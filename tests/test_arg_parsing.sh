@@ -19,4 +19,12 @@ assert_eq "night-dev.sh 1.0.0" "$local_output" "version output"
 test_start "parse_args: two positional args exits 1"
 assert_exit 1 parse_args /path/one /path/two
 
+# --- Test 4: --max-loops 0 exits 1 ---
+test_start "parse_args: --max-loops 0 exits 1"
+assert_exit 1 parse_args --max-loops 0
+
+# --- Test 5: --branch without value exits 1 ---
+test_start "parse_args: --branch without value exits 1"
+assert_exit 1 parse_args --branch
+
 test_summary

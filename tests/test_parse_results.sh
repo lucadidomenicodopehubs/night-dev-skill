@@ -51,4 +51,41 @@ test_start "parse_test_results: empty file"
 parse_test_results "$TEST_TMPDIR/empty_output.txt"
 assert_eq "0" "$_PARSE_PASSED" "empty file returns 0"
 
+# --- Test 5: pytest with both passed and failed ---
+test_start "parse_test_results: pytest mixed results"
+cat > "$TEST_TMPDIR/mixed_output.txt" <<'EOF'
+3 failed, 20 passed in 2.5s
+EOF
+parse_test_results "$TEST_TMPDIR/mixed_output.txt"
+assert_eq "20" "$_PARSE_PASSED" "passed count"
+assert_eq "3" "$_PARSE_FAILED" "failed count"
+assert_eq "23" "$_PARSE_TOTAL" "total count"
+
+# --- Test 6: output with coverage percentage ---
+test_start "parse_test_results: output with coverage"
+cat > "$TEST_TMPDIR/cov_output.txt" <<'EOF'
+23 passed in 1.23s
+TOTAL                                                 85%
+EOF
+parse_test_results "$TEST_TMPDIR/cov_output.txt"
+assert_eq "23" "$_PARSE_PASSED" "passed count"
+
+# --- Test 7: output with duration ---
+test_start "parse_test_results: output with duration"
+cat > "$TEST_TMPDIR/dur_output.txt" <<'EOF'
+15 passed in 4.56s
+EOF
+parse_test_results "$TEST_TMPDIR/dur_output.txt"
+assert_eq "15" "$_PARSE_PASSED" "passed count"
+assert_eq "4" "$_PARSE_DUR" "duration seconds"
+
+# --- Test 8: garbage input ---
+test_start "parse_test_results: garbage input"
+cat > "$TEST_TMPDIR/garbage_output.txt" <<'EOF'
+this is complete nonsense and contains no test metrics
+EOF
+parse_test_results "$TEST_TMPDIR/garbage_output.txt"
+assert_eq "0" "$_PARSE_PASSED" "garbage returns 0 passed"
+assert_eq "0" "$_PARSE_FAILED" "garbage returns 0 failed"
+
 test_summary

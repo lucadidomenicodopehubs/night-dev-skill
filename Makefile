@@ -1,6 +1,6 @@
 .PHONY: test test-syntax test-structure test-help test-version test-parse-results \
        test-detect-runner test-validate-numeric test-arg-parsing test-score-calc \
-       test-url-matching test-shellcheck test-dry-run
+       test-url-matching test-shellcheck test-dry-run test-git-checks
 
 SHELL := /bin/bash
 SCRIPT := scripts/night-dev.sh
@@ -13,7 +13,7 @@ REQUIRED_REFS := analyze-prompt.md planner-prompt.md implementation-prompt.md \
 
 test: test-syntax test-structure test-help test-version test-dry-run \
       test-parse-results test-detect-runner test-validate-numeric \
-      test-arg-parsing test-score-calc test-url-matching test-shellcheck
+      test-arg-parsing test-score-calc test-url-matching test-git-checks test-shellcheck
 	@echo ""
 	@echo "═══ All tests passed ═══"
 
@@ -71,6 +71,48 @@ test-structure:
 		done; \
 	else \
 		echo "SKIP: analyze-prompt.md not yet created"; \
+	fi
+	@# planner-prompt.md validation
+	@if [ -f "$(REFS)/planner-prompt.md" ]; then \
+		for cat in "TASK-" "risk" "score"; do \
+			if ! grep -qi "$$cat" $(REFS)/planner-prompt.md; then \
+				echo "FAIL: planner-prompt.md missing $$cat"; exit 1; \
+			fi; \
+			echo "PASS: planner-prompt.md contains $$cat"; \
+		done; \
+	else \
+		echo "SKIP: planner-prompt.md not yet created"; \
+	fi
+	@# implementation-prompt.md validation
+	@if [ -f "$(REFS)/implementation-prompt.md" ]; then \
+		for cat in "test" "CodeIntel"; do \
+			if ! grep -qi "$$cat" $(REFS)/implementation-prompt.md; then \
+				echo "FAIL: implementation-prompt.md missing $$cat"; exit 1; \
+			fi; \
+			echo "PASS: implementation-prompt.md contains $$cat"; \
+		done; \
+	else \
+		echo "SKIP: implementation-prompt.md not yet created"; \
+	fi
+	@# research-prompt.md validation
+	@if [ -f "$(REFS)/research-prompt.md" ]; then \
+		if ! grep -qi "search" $(REFS)/research-prompt.md; then \
+			echo "FAIL: research-prompt.md missing search"; exit 1; \
+		fi; \
+		echo "PASS: research-prompt.md contains search"; \
+	else \
+		echo "SKIP: research-prompt.md not yet created"; \
+	fi
+	@# report-prompt.md validation
+	@if [ -f "$(REFS)/report-prompt.md" ]; then \
+		for cat in "changelog" "score"; do \
+			if ! grep -qi "$$cat" $(REFS)/report-prompt.md; then \
+				echo "FAIL: report-prompt.md missing $$cat"; exit 1; \
+			fi; \
+			echo "PASS: report-prompt.md contains $$cat"; \
+		done; \
+	else \
+		echo "SKIP: report-prompt.md not yet created"; \
 	fi
 
 test-help:
@@ -135,3 +177,7 @@ test-shellcheck:
 	@echo "--- shellcheck validation ---"
 	@command -v shellcheck >/dev/null 2>&1 || { echo "SKIP: shellcheck not installed"; exit 0; }; \
 	shellcheck $(SCRIPT) && echo "PASS: shellcheck clean"
+
+test-git-checks:
+	@echo "--- git checks validation ---"
+	@bash tests/test_git_checks.sh

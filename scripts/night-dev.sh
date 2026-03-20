@@ -379,13 +379,13 @@ parse_test_results() {
         if [[ "$line" == *passed* ]]; then
             read -ra words <<< "$line"
             for ((i=0; i<${#words[@]}-1; i++)); do
-                [[ "${words[i+1]}" == "passed" ]] && py_p="${words[i]}"
+                [[ "${words[i+1]}" == passed* ]] && py_p="${words[i]}"
             done
         fi
         if [[ "$line" == *failed* ]]; then
             read -ra words <<< "$line"
             for ((i=0; i<${#words[@]}-1; i++)); do
-                [[ "${words[i+1]}" == "failed" ]] && py_f="${words[i]}"
+                [[ "${words[i+1]}" == failed* ]] && py_f="${words[i]}"
             done
         fi
         # jest/vitest-style: "Tests: X passed, Y failed, Z total"
@@ -412,8 +412,8 @@ parse_test_results() {
             local pct="${BASH_REMATCH[1]}"
             (( pct > 0 )) && cov="$pct"
         fi
-        # duration: line with time/duration/finished/ran and Ns
-        if [[ "$line" =~ ([Tt]ime|[Dd]uration|[Ff]inished|[Rr]an) ]] && [[ "$line" =~ ([0-9]+)(\.[0-9]+)?s ]]; then
+        # duration: line with time/duration/finished/ran/in and Ns
+        if [[ "$line" =~ ([Tt]ime|[Dd]uration|[Ff]inished|[Rr]an|\ in\ ) ]] && [[ "$line" =~ ([0-9]+)(\.[0-9]+)?s ]]; then
             local secs="${BASH_REMATCH[1]}"
             (( secs > 0 )) && dur="$secs"
         fi
@@ -429,6 +429,16 @@ parse_test_results() {
     fi
     (( _PARSE_TOTAL == 0 )) && _PARSE_TOTAL=$((_PARSE_PASSED + _PARSE_FAILED))
     _PARSE_COV=$((cov + 0)); _PARSE_DUR=$((dur + 0))
+}
+
+# Calculate composite score from test metrics (integer arithmetic, x10 precision)
+# Sets: _CALC_SCORE (string like "123.4"), _CALC_SCORE_X10 (integer like 1234)
+calculate_score() {
+    local passing=$1 failing=$2 total=$3 coverage=$4 time_s=$5
+    _CALC_SCORE_X10=$(( (passing * 100) + (total * 20) + (coverage * 50) - (failing * 200) - time_s ))
+    local sign="" abs=$_CALC_SCORE_X10
+    [[ $_CALC_SCORE_X10 -lt 0 ]] && { sign="-"; abs=$(( -_CALC_SCORE_X10 )); }
+    _CALC_SCORE="${sign}$(( abs / 10 )).$(( abs % 10 ))"
 }
 
 # --- Banner ---
@@ -1006,18 +1016,12 @@ ${PREV_CHANGELOG}"
       local cur_passing=$_PARSE_PASSED cur_failing=$_PARSE_FAILED cur_total=$_PARSE_TOTAL
       local cur_coverage=$_PARSE_COV cur_time_s=$_PARSE_DUR
 
-      # Inline score arithmetic — computes test_health only.
+      # Score calculation (test_health dimension)
       # code_quality and architecture_quality (per SKILL.md) are evaluated by
       # the Claude sub-agent in analysis.md, not by this bash wrapper.
-      local score_x10=$(( (cur_passing * 100) + (cur_total * 20) + (cur_coverage * 50) - (cur_failing * 200) - cur_time_s ))
-      local sign="" abs_score_x10=$score_x10
-      if [[ $score_x10 -lt 0 ]]; then
-        sign="-"
-        abs_score_x10=$(( -score_x10 ))
-      fi
-      local current_score=$(( abs_score_x10 / 10 ))
-      local score_remainder=$(( abs_score_x10 % 10 ))
-      current_score="${sign}${current_score}.${score_remainder}"
+      calculate_score "$cur_passing" "$cur_failing" "$cur_total" "$cur_coverage" "$cur_time_s"
+      local score_x10=$_CALC_SCORE_X10
+      local current_score="$_CALC_SCORE"
 
       echo -e "Score: ${YELLOW}${current_score}${NC} (passing=${cur_passing}, failing=${cur_failing}, total=${cur_total}, coverage=${cur_coverage}%)"
 
