@@ -19,6 +19,7 @@ AUTO_PUSH=false
 VERBOSE=false
 FOLLOW_MODE=false
 INLINE_MODE=false
+DRY_RUN=false
 HAS_JQ=false
 
 # --- Colors ---
@@ -59,6 +60,8 @@ Options:
   --verbose               Stream Claude output to terminal
   --follow <path>         Attach to a running Night Dev
   --inline                Run from inside Claude Code session
+  --dry-run               Run pre-flight checks only, no worktree or Claude invocation
+  --version               Show version and exit
   --help                  Show this help message
 EOF
     exit 0
@@ -132,6 +135,10 @@ parse_args() {
             --help)
                 usage
                 ;;
+            --version)
+                echo "night-dev.sh ${VERSION}"
+                exit 0
+                ;;
             --max-loops)
                 validate_numeric_arg "--max-loops" "${2:-}"
                 if [[ "$2" -eq 0 ]]; then
@@ -168,6 +175,10 @@ parse_args() {
                 ;;
             --inline)
                 INLINE_MODE=true
+                shift
+                ;;
+            --dry-run)
+                DRY_RUN=true
                 shift
                 ;;
             --follow)
@@ -306,8 +317,20 @@ detect_test_runner() {
         fi
     fi
 
-    # Go: *_test.go files (check root and subdirectories)
-    if compgen -G "$project"/*_test.go &>/dev/null || find "$project" -maxdepth 5 -name '*_test.go' -print -quit 2>/dev/null | read -r _; then
+    # Go: *_test.go files (check root and common subdirectories, no find fork)
+    local _go_found=false
+    if compgen -G "$project"/*_test.go &>/dev/null; then
+        _go_found=true
+    else
+        local _go_depth
+        for _go_depth in "$project"/*/ "$project"/*/*/ "$project"/*/*/*/ "$project"/*/*/*/*/ "$project"/*/*/*/*/*/; do
+            if compgen -G "${_go_depth}"*_test.go &>/dev/null 2>&1; then
+                _go_found=true
+                break
+            fi
+        done
+    fi
+    if [[ "$_go_found" == "true" ]]; then
         DETECTED_RUNNER="go test ./..."
         return 0
     fi
@@ -390,7 +413,7 @@ parse_test_results() {
             (( pct > 0 )) && cov="$pct"
         fi
         # duration: line with time/duration/finished/ran and Ns
-        if [[ "$line" =~ [Tt]ime|[Dd]uration|[Ff]inished|[Rr]an ]] && [[ "$line" =~ ([0-9]+)(\.[0-9]+)?s ]]; then
+        if [[ "$line" =~ ([Tt]ime|[Dd]uration|[Ff]inished|[Rr]an) ]] && [[ "$line" =~ ([0-9]+)(\.[0-9]+)?s ]]; then
             local secs="${BASH_REMATCH[1]}"
             (( secs > 0 )) && dur="$secs"
         fi
@@ -594,12 +617,18 @@ main() {
     check_git_repo
     check_dirty_state
     detect_test_runner
-    if [[ "$INLINE_MODE" != "true" ]]; then
+    if [[ "$INLINE_MODE" != "true" ]] && [[ "$DRY_RUN" != "true" ]]; then
         check_claude_cli
     fi
     check_jq
 
     print_banner
+
+    # --- Dry Run Mode ---
+    if [[ "$DRY_RUN" == "true" ]]; then
+        echo -e "${GREEN}Dry run complete: pre-flight checks passed${NC}"
+        exit 0
+    fi
 
     # --- Variables Setup ---
     START_TIME=${EPOCHSECONDS:-$(date +%s)}
@@ -1092,4 +1121,7 @@ ${PREV_CHANGELOG}"
     done
 }
 
-main "$@"
+# Allow sourcing without triggering main (enables unit testing of functions)
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi

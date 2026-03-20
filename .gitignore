@@ -1,4 +1,7 @@
 .night-shift-backup-*
 .night-shift/
+.night-dev-backup-*
+.night-dev/
+.night-dev-worktree/
 .codeintel/
 .claude/

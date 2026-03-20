@@ -1,4 +1,6 @@
-.PHONY: test test-syntax test-structure test-help
+.PHONY: test test-syntax test-structure test-help test-version test-parse-results \
+       test-detect-runner test-validate-numeric test-arg-parsing test-score-calc \
+       test-url-matching test-shellcheck test-dry-run
 
 SHELL := /bin/bash
 SCRIPT := scripts/night-dev.sh
@@ -9,7 +11,9 @@ REFS := references
 REQUIRED_REFS := analyze-prompt.md planner-prompt.md implementation-prompt.md \
                  report-prompt.md research-prompt.md
 
-test: test-syntax test-structure test-help
+test: test-syntax test-structure test-help test-version test-dry-run \
+      test-parse-results test-detect-runner test-validate-numeric \
+      test-arg-parsing test-score-calc test-url-matching test-shellcheck
 	@echo ""
 	@echo "═══ All tests passed ═══"
 
@@ -75,7 +79,7 @@ test-help:
 	@bash $(SCRIPT) --help > /dev/null 2>&1 && echo "PASS: --help exits 0"
 	@# --help must mention all flags and correctly omit --focus
 	@HELP=$$(bash $(SCRIPT) --help 2>&1); \
-	for flag in "--max-loops" "--hours" "--skip-research" "--push" "--verbose" "--follow" "--inline"; do \
+	for flag in "--max-loops" "--hours" "--skip-research" "--push" "--verbose" "--follow" "--inline" "--dry-run" "--version"; do \
 		if ! echo "$$HELP" | grep -q -- "$$flag"; then \
 			echo "FAIL: --help missing $$flag"; exit 1; \
 		fi; \
@@ -85,3 +89,49 @@ test-help:
 		echo "FAIL: --help should not contain --focus (Night Dev always does everything)"; exit 1; \
 	fi; \
 	echo "PASS: --help correctly omits --focus"
+
+test-version:
+	@echo "--- Version validation ---"
+	@bash $(SCRIPT) --version | grep -q "1.0.0" && echo "PASS: --version outputs version"
+	@bash $(SCRIPT) --version > /dev/null 2>&1 && echo "PASS: --version exits 0"
+
+test-dry-run:
+	@echo "--- Dry-run validation ---"
+	@# --dry-run with a clean temp git repo should exit 0 and print confirmation
+	@TMPDIR=$$(mktemp -d) && \
+	cd "$$TMPDIR" && \
+	git init -q && git commit --allow-empty -m "init" -q && \
+	printf 'test:\n\t@echo ok\n' > Makefile && git add . && git commit -m "add Makefile" -q && \
+	OUTPUT=$$(NO_COLOR=1 bash "$(CURDIR)/$(SCRIPT)" --dry-run "$$TMPDIR" 2>&1) && \
+	echo "$$OUTPUT" | grep -q "Dry run complete" && \
+	echo "PASS: --dry-run exits 0 and confirms pre-flight" && \
+	rm -rf "$$TMPDIR" || { echo "FAIL: --dry-run did not complete successfully"; rm -rf "$$TMPDIR"; exit 1; }
+
+test-parse-results:
+	@echo "--- parse_test_results validation ---"
+	@bash tests/test_parse_results.sh
+
+test-detect-runner:
+	@echo "--- detect_test_runner validation ---"
+	@bash tests/test_detect_runner.sh
+
+test-validate-numeric:
+	@echo "--- validate_numeric_arg validation ---"
+	@bash tests/test_validate_numeric.sh
+
+test-arg-parsing:
+	@echo "--- argument parsing validation ---"
+	@bash tests/test_arg_parsing.sh
+
+test-score-calc:
+	@echo "--- score calculation validation ---"
+	@bash tests/test_score_calc.sh
+
+test-url-matching:
+	@echo "--- URL matching validation ---"
+	@bash tests/test_url_matching.sh
+
+test-shellcheck:
+	@echo "--- shellcheck validation ---"
+	@command -v shellcheck >/dev/null 2>&1 || { echo "SKIP: shellcheck not installed"; exit 0; }; \
+	shellcheck $(SCRIPT) && echo "PASS: shellcheck clean"
