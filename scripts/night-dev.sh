@@ -636,6 +636,20 @@ main() {
     START_TIME=${EPOCHSECONDS:-$(date +%s)}
     DEADLINE=$((START_TIME + MAX_HOURS * 3600))
 
+    # --- Pre-run Backup ---
+    # Create a full backup of the project before any changes
+    BACKUP_DIR="${PROJECT_PATH}/.night-dev-backup-${DATE_TAG}"
+    if [[ -d "$BACKUP_DIR" ]]; then
+        echo -e "${YELLOW}Removing previous backup: ${BACKUP_DIR}${NC}"
+        rm -rf "$BACKUP_DIR"
+    fi
+    echo -e "${CYAN}Creating pre-run backup...${NC}"
+    git -C "$PROJECT_PATH" stash --include-untracked -m "night-dev-backup-${DATE_TAG}" 2>/dev/null || true
+    git -C "$PROJECT_PATH" clone --local --no-hardlinks "$PROJECT_PATH" "$BACKUP_DIR" 2>/dev/null
+    git -C "$PROJECT_PATH" stash pop 2>/dev/null || true
+    echo -e "${GREEN}Backup created: ${BACKUP_DIR}${NC}"
+    echo -e "${GREEN}To restore: rm -rf ${PROJECT_PATH} && mv ${BACKUP_DIR} ${PROJECT_PATH}${NC}"
+
     # --- Worktree Creation ---
     # Clean up existing worktree from previous failed run
     if [[ -d "$WORKTREE_PATH" ]]; then
@@ -803,6 +817,9 @@ EOSETTINGS
       echo "Loops completed: $CURRENT_LOOP / $MAX_LOOPS"
       echo "Branch: $BRANCH_NAME"
       echo "Worktree: $WORKTREE_PATH"
+      if [[ -d "${BACKUP_DIR:-}" ]]; then
+        echo "Backup: $BACKUP_DIR"
+      fi
       if [[ "$HAS_JQ" == "true" ]] && [[ -f "$ND_DIR/status.json" ]]; then
         local final_score
         final_score=$(jq -r '.current_tests.score // "N/A"' "$ND_DIR/status.json" 2>/dev/null)
