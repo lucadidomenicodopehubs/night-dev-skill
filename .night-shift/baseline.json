@@ -1,0 +1,29 @@
+{
+  "timestamp": "2026-03-20",
+  "test_suite": {
+    "runner": "make test",
+    "total": 29,
+    "passed": 27,
+    "failed": 0,
+    "skipped": 2,
+    "exit_code": 0
+  },
+  "codebase": {
+    "source_files": 9,
+    "total_lines": 2544,
+    "main_script_lines": 1084,
+    "skill_md_lines": 384,
+    "reference_files": 5,
+    "reference_lines": 887,
+    "makefile_lines": 90,
+    "command_lines": 98
+  },
+  "markers": {
+    "TODO": 0,
+    "FIXME": 0,
+    "HACK": 0,
+    "XXX": 0,
+    "total": 0,
+    "note": "TODO/FIXME references exist in prompt templates (analyze-prompt.md, SKILL.md) but are instructional, not code markers"
+  }
+}
