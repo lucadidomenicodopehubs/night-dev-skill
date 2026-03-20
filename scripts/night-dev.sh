@@ -223,12 +223,8 @@ parse_args() {
         exit 1
     fi
 
-    # Resolve to absolute path (prefer readlink -f to avoid subshell cd)
-    if readlink -f "$PROJECT_PATH" &>/dev/null; then
-        PROJECT_PATH="$(readlink -f "$PROJECT_PATH")"
-    else
-        PROJECT_PATH="$(cd "$PROJECT_PATH" && pwd)"
-    fi
+    # Resolve to absolute path (single fork: try readlink, fallback to cd+pwd)
+    PROJECT_PATH=$(readlink -f "$PROJECT_PATH" 2>/dev/null) || PROJECT_PATH=$(cd "$PROJECT_PATH" && pwd)
 }
 
 # --- Pre-flight Checks ---
@@ -275,12 +271,13 @@ detect_test_runner() {
         return 0
     fi
 
-    # Node: package.json with scripts.test (not the default placeholder) — single awk pass
+    # Node: package.json with scripts.test (not the default placeholder) — pure bash
     if [[ -f "$project/package.json" ]]; then
-        local test_info
-        test_info=$(awk '/"test"[[:space:]]*:/{found=1} /no test specified/{placeholder=1} END{print found+0, placeholder+0}' "$project/package.json")
-        local has_test has_placeholder
-        read -r has_test has_placeholder <<< "$test_info"
+        local has_test=0 has_placeholder=0 line
+        while IFS= read -r line; do
+            [[ "$line" == *'"test"'* && "$line" == *:* ]] && has_test=1
+            [[ "$line" == *'no test specified'* ]] && has_placeholder=1
+        done < "$project/package.json"
         if [[ "$has_test" -eq 1 ]] && [[ "$has_placeholder" -eq 0 ]]; then
             DETECTED_RUNNER="npm test"
             return 0
@@ -603,12 +600,12 @@ main() {
     print_banner
 
     # --- Variables Setup ---
-    DATE_TAG=$(date +%Y-%m-%d)
+    START_TIME=${EPOCHSECONDS:-$(date +%s)}
+    printf -v DATE_TAG '%(%Y-%m-%d)T' "$START_TIME"
     BRANCH_NAME="night-dev/${DATE_TAG}"
     WORKTREE_PATH="${PROJECT_PATH}/.night-dev-worktree"
     ND_DIR="${WORKTREE_PATH}/.night-dev"
     SKILL_DIR="${NIGHT_DEV_SKILL_DIR:-$HOME/.claude/skills/night-dev}"
-    START_TIME=${EPOCHSECONDS:-$(date +%s)}
     DEADLINE=$((START_TIME + MAX_HOURS * 3600))
 
     # --- Pre-run Backup ---
@@ -643,9 +640,9 @@ main() {
     mkdir -p "$ND_DIR"
 
     # --- status.json Initialization ---
-    # Cross-platform ISO-8601 timestamps
-    STARTED_AT=$(date -Iseconds 2>/dev/null || date +%Y-%m-%dT%H:%M:%S%z)
-    DEADLINE_ISO=$(date -d @$DEADLINE -Iseconds 2>/dev/null || date -r $DEADLINE -Iseconds 2>/dev/null || echo "unknown")
+    # ISO-8601 timestamps via printf (no forks)
+    printf -v STARTED_AT '%(%Y-%m-%dT%H:%M:%S%z)T' "$START_TIME"
+    printf -v DEADLINE_ISO '%(%Y-%m-%dT%H:%M:%S%z)T' "$DEADLINE"
 
     jq -n \
       --arg version "$VERSION" \

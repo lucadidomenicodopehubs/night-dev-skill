@@ -7,8 +7,7 @@ REFS := references
 
 # Required reference files that SKILL.md dispatches to
 REQUIRED_REFS := analyze-prompt.md planner-prompt.md implementation-prompt.md \
-                 risk-gate-prompt.md report-prompt.md research-prompt.md \
-                 codeintel-reference.md
+                 report-prompt.md research-prompt.md
 
 test: test-syntax test-structure test-help
 	@echo ""
