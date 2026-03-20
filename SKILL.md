@@ -89,9 +89,14 @@ Execute each phase sequentially. Use the Agent tool to dispatch sub-agents for e
 3. **Understand the test structure** — what's tested, what's not, how tests are organized
 4. **Read TODO.md, ROADMAP.md, GitHub issues** if accessible
 5. **Build dependency map** — which modules depend on which
+6. **If CodeIntel is available**, use it to map the architecture automatically:
+   - `query` to find all major modules and entry points
+   - `cypher` to find coupling hotspots, god files, orphan code, circular dependencies
+   - Read `~/.claude/skills/night-dev/references/codeintel-reference.md` for available queries and patterns
 
 Dispatch a sub-agent via the Agent tool:
 - Instruct it to read the prompt template from `~/.claude/skills/night-dev/references/analyze-prompt.md`
+- If CodeIntel is available, also instruct it to read `~/.claude/skills/night-dev/references/codeintel-reference.md`
 - Set context: `PHASE=deep_read`
 
 **Output:** `{LOOP_DIR}/project_understanding.md` containing:
@@ -150,6 +155,7 @@ Also copy to `{ND_DIR}/baseline.json` for cross-loop reference.
 
 Dispatch a sub-agent via the Agent tool:
 - Instruct it to read the prompt template from `~/.claude/skills/night-dev/references/analyze-prompt.md`
+- If CodeIntel is available, also instruct it to read `~/.claude/skills/night-dev/references/codeintel-reference.md` and use CodeIntel tools for Level 3 architectural analysis (coupling hotspots, god files, orphan code, circular deps)
 - Set context: `PHASE=analyze`
 - Provide `{LOOP_DIR}/project_understanding.md` (from FASE 0, or from loop 1's directory if loop 2+)
 - Provide `{LOOP_DIR}/baseline.json`
