@@ -1,7 +1,7 @@
 {
   "version": "1.0.0",
   "started_at": "2026-03-20T00:59:28+00:00",
-  "current_loop": 1,
+  "current_loop": 2,
   "max_loops": 3,
   "max_hours": 8,
   "deadline": "2026-03-20T08:59:28+00:00",
@@ -10,11 +10,11 @@
   "test_runner": "make test",
   "skip_research": false,
   "focus_mode": "performance",
-  "phase": "LOOP 1 — RUNNING CLAUDE",
+  "phase": "LOOP 2 — RUNNING CLAUDE",
   "current_task": "",
   "stats": {
-    "total_applied": 0,
-    "total_skipped": 0,
+    "total_applied": 6,
+    "total_skipped": 4,
     "total_rollbacked": 0,
     "total_escalated": 0,
     "consecutive_zero_applied": 0
