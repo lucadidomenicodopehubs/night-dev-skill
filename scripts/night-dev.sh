@@ -338,45 +338,8 @@ check_jq() {
     fi
 }
 
-# --- Awk Script Constants ---
-readonly _PARSE_AWK_SCRIPT='
-    # pytest-style: "X passed, Y failed"
-    /passed/ { for(i=1;i<=NF;i++) if($(i+1)=="passed") py_p=$i }
-    /failed/ { for(i=1;i<=NF;i++) if($(i+1)=="failed") py_f=$i }
-
-    # jest/vitest-style: "Tests: X passed, Y failed, Z total"
-    /Tests:.*passed/ { for(i=1;i<=NF;i++) { if($(i+1)=="passed,") js_p=$i; if($(i+1)=="failed,") js_f=$i; if($(i+1)=="total") js_t=$i } }
-
-    # cargo-style: "test result: ok. X passed; Y failed"
-    /test result:/ { for(i=1;i<=NF;i++) { if($(i+1)=="passed;") cg_p=$i; if($(i+1)~/^failed/) cg_f=$i } }
-
-    # coverage: line matching "cover" with a percentage
-    /[0-9]+(\.[0-9]+)?%/ && /[Cc]over/ {
-        match($0, /([0-9]+(\.[0-9]+)?)%/, arr)
-        if (arr[1]+0 > 0) cov=arr[1]
-    }
-
-    # duration: line matching time/duration/finished/ran with Ns
-    /[0-9]+(\.[0-9]+)?s/ && /[Tt]ime|[Dd]uration|[Ff]inished|[Rr]an/ {
-        match($0, /([0-9]+(\.[0-9]+)?)s/, arr)
-        if (arr[1]+0 > 0) dur=arr[1]
-    }
-
-    END {
-        p=py_p+0; f=py_f+0; t=0
-        # Fallback to jest if pytest found nothing
-        if (p==0 && f==0) { p=js_p+0; f=js_f+0; t=js_t+0 }
-        # Fallback to cargo if jest found nothing
-        if (p==0 && f==0) { p=cg_p+0; f=cg_f+0 }
-        if (t==0) t=p+f
-        # Truncate coverage and duration to integer
-        c=int(cov+0); d=int(dur+0)
-        print p, f, t, c, d
-    }
-'
-
 # Parse test results from a test output file and extract counts
-# Single-pass awk: tries pytest, jest, cargo patterns + coverage + duration in one invocation
+# Pure bash: tries pytest, jest, cargo patterns + coverage + duration (no awk fork)
 # Sets global variables: _PARSE_PASSED, _PARSE_FAILED, _PARSE_TOTAL, _PARSE_COV, _PARSE_DUR
 parse_test_results() {
     local test_output_file="$1"
@@ -386,9 +349,63 @@ parse_test_results() {
         return
     fi
 
-    local result
-    result=$(awk "$_PARSE_AWK_SCRIPT" "$test_output_file")
-    read -r _PARSE_PASSED _PARSE_FAILED _PARSE_TOTAL _PARSE_COV _PARSE_DUR <<< "${result:-0 0 0 0 0}"
+    local py_p=0 py_f=0 js_p=0 js_f=0 js_t=0 cg_p=0 cg_f=0 cov=0 dur=0
+    local line word words
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        # pytest-style: "X passed" / "X failed"
+        if [[ "$line" == *passed* ]]; then
+            read -ra words <<< "$line"
+            for ((i=0; i<${#words[@]}-1; i++)); do
+                [[ "${words[i+1]}" == "passed" ]] && py_p="${words[i]}"
+            done
+        fi
+        if [[ "$line" == *failed* ]]; then
+            read -ra words <<< "$line"
+            for ((i=0; i<${#words[@]}-1; i++)); do
+                [[ "${words[i+1]}" == "failed" ]] && py_f="${words[i]}"
+            done
+        fi
+        # jest/vitest-style: "Tests: X passed, Y failed, Z total"
+        if [[ "$line" == *Tests:*passed* ]]; then
+            read -ra words <<< "$line"
+            for ((i=0; i<${#words[@]}-1; i++)); do
+                case "${words[i+1]}" in
+                    "passed,") js_p="${words[i]}" ;;
+                    "failed,") js_f="${words[i]}" ;;
+                    "total")   js_t="${words[i]}" ;;
+                esac
+            done
+        fi
+        # cargo-style: "test result: ok. X passed; Y failed"
+        if [[ "$line" == *"test result:"* ]]; then
+            read -ra words <<< "$line"
+            for ((i=0; i<${#words[@]}-1; i++)); do
+                [[ "${words[i+1]}" == "passed;" ]] && cg_p="${words[i]}"
+                [[ "${words[i+1]}" == failed* ]]   && cg_f="${words[i]}"
+            done
+        fi
+        # coverage: line with "cover" and a percentage
+        if [[ "$line" == *[Cc]over* ]] && [[ "$line" =~ ([0-9]+)(\.[0-9]+)?% ]]; then
+            local pct="${BASH_REMATCH[1]}"
+            (( pct > 0 )) && cov="$pct"
+        fi
+        # duration: line with time/duration/finished/ran and Ns
+        if [[ "$line" =~ [Tt]ime|[Dd]uration|[Ff]inished|[Rr]an ]] && [[ "$line" =~ ([0-9]+)(\.[0-9]+)?s ]]; then
+            local secs="${BASH_REMATCH[1]}"
+            (( secs > 0 )) && dur="$secs"
+        fi
+    done < "$test_output_file"
+
+    # Priority: pytest > jest > cargo
+    _PARSE_PASSED=$((py_p + 0)); _PARSE_FAILED=$((py_f + 0))
+    if (( _PARSE_PASSED == 0 && _PARSE_FAILED == 0 )); then
+        _PARSE_PASSED=$((js_p + 0)); _PARSE_FAILED=$((js_f + 0)); _PARSE_TOTAL=$((js_t + 0))
+    fi
+    if (( _PARSE_PASSED == 0 && _PARSE_FAILED == 0 )); then
+        _PARSE_PASSED=$((cg_p + 0)); _PARSE_FAILED=$((cg_f + 0))
+    fi
+    (( _PARSE_TOTAL == 0 )) && _PARSE_TOTAL=$((_PARSE_PASSED + _PARSE_FAILED))
+    _PARSE_COV=$((cov + 0)); _PARSE_DUR=$((dur + 0))
 }
 
 # --- Banner ---
@@ -446,11 +463,12 @@ follow_night_dev() {
     local has_jq=false
     command -v jq &>/dev/null && has_jq=true
 
-    # Find active Night Dev worktrees — single find with -printf for mtime (avoids stat forks)
-    local status_file=""
-    status_file=$(find "$search_path" "$HOME/night-dev-repos" -maxdepth 4 \
-        -name "status.json" -path "*/.night-dev/*" -printf '%T@ %p\n' 2>/dev/null \
-        | sort -rn | head -1 | cut -d' ' -f2-)
+    # Find active Night Dev worktrees — find + bash loop to track newest (avoids sort/head/cut forks)
+    local status_file="" _best_ts="0" _ts _path
+    while IFS=' ' read -r _ts _path; do
+        [[ "$_ts" > "$_best_ts" ]] && _best_ts="$_ts" && status_file="$_path"
+    done < <(find "$search_path" "$HOME/night-dev-repos" -maxdepth 4 \
+        -name "status.json" -path "*/.night-dev/*" -printf '%T@ %p\n' 2>/dev/null)
 
     if [[ -z "$status_file" ]]; then
         echo -e "${RED}No Night Dev instances found.${NC}"
@@ -629,56 +647,48 @@ main() {
     printf -v STARTED_AT '%(%Y-%m-%dT%H:%M:%S%z)T' "$START_TIME"
     printf -v DEADLINE_ISO '%(%Y-%m-%dT%H:%M:%S%z)T' "$DEADLINE"
 
-    jq -n \
-      --arg version "$VERSION" \
-      --arg started_at "$STARTED_AT" \
-      --argjson current_loop 0 \
-      --argjson max_loops "$MAX_LOOPS" \
-      --argjson max_hours "$MAX_HOURS" \
-      --arg deadline "$DEADLINE_ISO" \
-      --arg branch "$BRANCH_NAME" \
-      --arg worktree_path "$WORKTREE_PATH" \
-      --arg test_runner "$DETECTED_RUNNER" \
-      --argjson skip_research "$SKIP_RESEARCH" \
-      '{
-        version: $version,
-        started_at: $started_at,
-        current_loop: $current_loop,
-        max_loops: $max_loops,
-        max_hours: $max_hours,
-        deadline: $deadline,
-        branch: $branch,
-        worktree_path: $worktree_path,
-        test_runner: $test_runner,
-        skip_research: $skip_research,
-        phase: "INITIALIZED",
-        current_task: "",
-        stats: {
-          total_applied: 0,
-          total_skipped: 0,
-          total_reverted: 0,
-          total_escalated: 0,
-          consecutive_zero_applied: 0
-        },
-        baseline_tests: {
-          passing: 0,
-          failing: 0,
-          total: 0,
-          coverage: 0,
-          time_s: 0,
-          score: "0.0"
-        },
-        current_tests: {
-          passing: 0,
-          failing: 0,
-          total: 0,
-          coverage: 0,
-          time_s: 0,
-          score: "0.0"
-        },
-        score_history: [],
-        circuit_breaker: "CLOSED"
-      }' > "$ND_DIR/status.json"
+    # Write initial status.json via heredoc (no jq fork — all values are pre-validated)
+    cat > "$ND_DIR/status.json" <<EOSTATUS
+{
+  "version": "${VERSION}",
+  "started_at": "${STARTED_AT}",
+  "current_loop": 0,
+  "max_loops": ${MAX_LOOPS},
+  "max_hours": ${MAX_HOURS},
+  "deadline": "${DEADLINE_ISO}",
+  "branch": "${BRANCH_NAME}",
+  "worktree_path": "${WORKTREE_PATH}",
+  "test_runner": "${DETECTED_RUNNER}",
+  "skip_research": ${SKIP_RESEARCH},
+  "phase": "INITIALIZED",
+  "current_task": "",
+  "stats": {
+    "total_applied": 0,
+    "total_skipped": 0,
+    "total_reverted": 0,
+    "total_escalated": 0,
+    "consecutive_zero_applied": 0
+  },
+  "baseline_tests": {
+    "passing": 0,
+    "failing": 0,
+    "total": 0,
+    "coverage": 0,
+    "time_s": 0,
+    "score": "0.0"
+  },
+  "current_tests": {
+    "passing": 0,
+    "failing": 0,
+    "total": 0,
+    "coverage": 0,
+    "time_s": 0,
+    "score": "0.0"
+  },
+  "score_history": [],
+  "circuit_breaker": "CLOSED"
+}
+EOSTATUS
 
     echo -e "${GREEN}Worktree created: ${WORKTREE_PATH}${NC}"
     echo -e "${GREEN}Branch: ${BRANCH_NAME}${NC}"
