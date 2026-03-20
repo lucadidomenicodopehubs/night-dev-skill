@@ -645,7 +645,7 @@ main() {
     fi
     echo -e "${CYAN}Creating pre-run backup...${NC}"
     git -C "$PROJECT_PATH" stash --include-untracked -m "night-dev-backup-${DATE_TAG}" 2>/dev/null || true
-    git -C "$PROJECT_PATH" clone --local --no-hardlinks "$PROJECT_PATH" "$BACKUP_DIR" 2>/dev/null
+    git -C "$PROJECT_PATH" clone --local "$PROJECT_PATH" "$BACKUP_DIR" 2>/dev/null
     git -C "$PROJECT_PATH" stash pop 2>/dev/null || true
     echo -e "${GREEN}Backup created: ${BACKUP_DIR}${NC}"
     echo -e "${GREEN}To restore: rm -rf ${PROJECT_PATH} && mv ${BACKUP_DIR} ${PROJECT_PATH}${NC}"
