@@ -1,98 +1,143 @@
-# Night Shift Task Plan — Loop 3 (Validated)
+# Night Shift Loop 3 — Validated Task Plan
 
-Focus: **PERFORMANCE** (remaining optimizations after 18 tasks in loops 1-2)
-
-## Risk Gate Results
-
-- **5 APPROVED** (safe for automated implementation)
-- **3 SKIPPED** (low impact, large diff, or cosmetic)
-- **0 URGENT**
+**Date:** 2026-03-20
+**Loop:** 3 (Final, 3/3)
+**Priority order:** security > bug > intent > architecture > performance > cost > quality
+**Risk gate:** SKIPPED for high-risk + large diffs; URGENT for security; APPROVED for safe & verifiable
+**Max tasks:** 8
 
 ---
 
-## Ordered Task List
+## Task Selection Rationale
 
-### TASK-1: Replace grep forks in detect_test_runner for pyproject.toml/setup.cfg (PERF-20)
-- **Category**: performance
-- **Description**: Replace `grep -q` calls with bash `$(<file)` + glob pattern matching, eliminating 2 potential grep forks at startup
-- **Files**: `scripts/night-dev.sh`
-- **Risk level**: low
-- **Verification**: `make test` passes; detect_test_runner still correctly identifies pytest
-- **Estimated complexity**: small
-- **Verdict**: APPROVED
+**APPROVED (will apply):**
+- BUG-01 (MEDIUM, 1-line fix): inline mode TIMEOUT overwrite — orchestrator impact
+- BUG-02 (MEDIUM, 10-line addition): missing claude_output.log guard — false stagnation risk
+- SEC-01 (MEDIUM, 4 JSON lines): sub-agent permissions allowlist — silent failure prevention
+- QUAL-01 (MEDIUM, mktemp refactor × 4 sites): status.tmp.json race condition — low-probability corruption
+- BUG-03 (LOW, 2-line comment): score formula documentation — clarity only
 
-### TASK-2: Replace grep in Makefile test target detection (PERF-21)
-- **Category**: performance
-- **Description**: Replace `grep -qE '^test[[:space:]]*:'` with bash while-read + regex matching
-- **Files**: `scripts/night-dev.sh`
-- **Risk level**: low
-- **Verification**: `make test` passes; Makefile test runner detection still works
-- **Estimated complexity**: small
-- **Verdict**: APPROVED
+**SKIPPED (deferred to future):**
+- QUAL-02 (LOW): printf+jq simplification — cosmetic, low impact
+- QUAL-03 (LOW): follow mode local redeclaration — cosmetic, no functional change
+- QUAL-04 (LOW): monitor loop local placement — cosmetic, no functional change
+- PERF-01 (LOW): parse_test_results subshell — marginal (<1ms), readability tradeoff
+- PERF-02 (LOW): stat loop in follow mode — edge case, 1-3 worktrees typical
+- SEC-02 (LOW): follow mode search scope — edge case with concurrent instances
 
-### TASK-3: Replace find|grep with find|read in Go test detection (PERF-22)
-- **Category**: performance
-- **Description**: Replace `find ... | grep -q .` with `find ... | read -r _` to eliminate 1 grep fork
-- **Files**: `scripts/night-dev.sh`
-- **Risk level**: low
-- **Verification**: `make test` passes
-- **Estimated complexity**: small
-- **Verdict**: APPROVED
-
-### TASK-4: Remove redundant git stash/pop around backup clone (PERF-23)
-- **Category**: performance
-- **Description**: Remove `git stash` and `git stash pop` calls that are no-ops since check_dirty_state guarantees a clean worktree
-- **Files**: `scripts/night-dev.sh`
-- **Risk level**: low
-- **Verification**: `make test` passes; backup still created correctly
-- **Estimated complexity**: small
-- **Verdict**: APPROVED
-
-### TASK-5: Remove dead calculate_score function (QUALITY-06)
-- **Category**: quality
-- **Description**: Remove the `calculate_score` function (lines 368-388) that was inlined in loop 2 and has no remaining callers
-- **Files**: `scripts/night-dev.sh`
-- **Risk level**: low
-- **Verification**: `make test` passes; `grep -n calculate_score scripts/night-dev.sh` shows no call sites
-- **Estimated complexity**: small
-- **Verdict**: APPROVED
+**Rationale:** Final loop focuses on 4 medium-severity items (BUG-01, BUG-02, SEC-01, QUAL-01) + BUG-03 comment. All fixes are in `scripts/night-dev.sh` (single file, tight coupling favors batch application). Cosmetic and marginal items deferred to preserve stability in final loop.
 
 ---
 
-## Skipped
+## Tasks
 
-### SKIPPED: PERF-24 — echo -e to printf migration
-- **Reason**: Large diff (~30 lines changed), low practical impact. echo -e works correctly in bash. Deferred as cosmetic.
+### TASK-1: Fix inline mode TIMEOUT overwrite
 
-### SKIPPED: QUALITY-05 — Magic number 20 in follow mode fallback
-- **Reason**: Cosmetic. The fallback loop is an edge case. Deferred from loops 1-2 for the same reason.
-
-### SKIPPED: QUALITY-07 — Document SKILL.md keyword coupling
-- **Reason**: Comment-only change with no functional impact. Low priority.
-
----
-
-## Batch Strategy
-
-All 5 tasks modify `scripts/night-dev.sh`. Tasks 1-3 modify the same function (`detect_test_runner`) and should be in the same batch. Task 4 modifies `main()` backup section. Task 5 removes a function definition.
-
-**Batch 1**: TASK-1, TASK-2, TASK-3 (all in detect_test_runner — related but non-overlapping lines)
-**Batch 2**: TASK-4, TASK-5 (different sections of the file)
-
-Since all tasks touch the same file, sequential batching is safer.
-
-**Recommended**: Single batch with all 5 tasks (all are small, low-risk, and modify different sections).
+**ID:** TASK-1
+**Category:** bug
+**Description:** Line 915 unconditionally writes "DONE" to inline_status, overwriting "TIMEOUT" written at line 911 on deadline. Fix: guard the DONE write with a check for the `done` file existence.
+**Files:** `scripts/night-dev.sh`
+**Risk level:** low
+**Verification:**
+```bash
+# Manual inspection: confirm line 915 now checks [[ -f "$LOOP_DIR/done" ]]
+# Run: make test (should pass all 29 tests)
+```
+**Estimated complexity:** small
+**Verdict:** APPROVED
 
 ---
 
-## Performance Impact Summary
+### TASK-2: Add claude_output.log guard for inline mode
 
-**Startup:**
-- Eliminated forks: 2-4 (grep in pyproject/setup.cfg, grep in Makefile, grep in Go detection, git stash/pop)
-- Estimated savings: ~5-15ms
+**ID:** TASK-2
+**Category:** bug
+**Description:** After inline mode completes (line 946), add a guard to check that `claude_output.log` exists and is non-empty before calling `parse_test_results`. If missing in inline mode, increment CONSECUTIVE_ZERO, persist to status.json, and continue to next loop (mirroring the non-inline failure path at lines 933-944).
+**Files:** `scripts/night-dev.sh`
+**Risk level:** low
+**Verification:**
+```bash
+# Manual inspection: confirm guard added after line 946 with correct file checks
+# Run: make test (should pass all 29 tests)
+```
+**Estimated complexity:** small
+**Verdict:** APPROVED
 
-**Code quality:**
-- Removed dead code: ~20 lines (calculate_score function)
-- Consistent pattern: all detect_test_runner checks now use bash builtins
+---
 
-**Total across all 3 loops: ~24 tasks applied, eliminating ~30-40 subprocess forks**
+### TASK-3: Expand sub-agent Bash permissions allowlist
+
+**ID:** TASK-3
+**Category:** security
+**Description:** Add `mkdir`, `find`, `head`, `tail` to the Bash permissions allowlist in `.night-shift/settings.json` (lines 718-739 in night-dev.sh). These commands are required by sub-agent tasks (directory creation, codebase scanning, log inspection) and currently missing from the allowlist, causing silent failures in `claude -p` non-interactive mode.
+**Files:** `.night-shift/settings.json` (referenced/generated by `scripts/night-dev.sh`)
+**Risk level:** low
+**Verification:**
+```bash
+# Manual inspection: confirm 4 new Bash permission lines added to allow array
+# Run: make test (should pass all 29 tests)
+```
+**Estimated complexity:** small
+**Verdict:** APPROVED
+
+---
+
+### TASK-4: Replace hardcoded temp file paths with mktemp
+
+**ID:** TASK-4
+**Category:** quality
+**Description:** Replace `local tmp="${ND_DIR}/status.tmp.json"` with `local tmp; tmp=$(mktemp "${ND_DIR}/status.tmp.XXXXXX.json")` at 4 sites (lines 765, 855, 939, 1036). Append `|| rm -f "$tmp"` to the mv command to clean up failed writes. This eliminates the race condition between main loop and cleanup trap writing to the same temp file path.
+**Files:** `scripts/night-dev.sh`
+**Risk level:** low
+**Verification:**
+```bash
+# Manual inspection: confirm all 4 sites use mktemp + unique temp names
+# Run: make test (should pass all 29 tests)
+# Regression: confirm status.json still updates correctly (inspect during a manual run)
+```
+**Estimated complexity:** medium
+**Verdict:** APPROVED
+
+---
+
+### TASK-5: Add comment documenting score formula divergence
+
+**ID:** TASK-5
+**Category:** intent
+**Description:** Add a 3-line comment near line 961 explaining that the bash script computes only the `test_health` component of the score; `code_quality` and `architecture_quality` are evaluated by the Claude sub-agent in analysis.md. Reference SKILL.md for the full formula. This clarifies the intentional divergence between documentation and implementation.
+**Files:** `scripts/night-dev.sh`
+**Risk level:** low
+**Verification:**
+```bash
+# Manual inspection: confirm comment added near line 961
+# No functional change; comment-only verification passes trivially
+```
+**Estimated complexity:** small
+**Verdict:** APPROVED
+
+---
+
+## Summary
+
+| ID | Category | Risk | Status | Files | Complexity |
+|---|---|---|---|---|---|
+| TASK-1 | bug | low | APPROVED | scripts/night-dev.sh | small |
+| TASK-2 | bug | low | APPROVED | scripts/night-dev.sh | small |
+| TASK-3 | security | low | APPROVED | .night-shift/settings.json | small |
+| TASK-4 | quality | low | APPROVED | scripts/night-dev.sh | medium |
+| TASK-5 | intent | low | APPROVED | scripts/night-dev.sh | small |
+| **Total** | | | **5 APPROVED** | **1 file touched** | **4 small, 1 medium** |
+
+**All changes:** Single file (`scripts/night-dev.sh`) + embedded settings.json changes. Low-risk, high-verifiable, no API or architectural changes. Ready for implementation.
+
+---
+
+## Implementation Order
+
+1. TASK-1 (1-line fix, immediate impact on orchestrator visibility)
+2. TASK-2 (guards against false stagnation, depends on TASK-1 success)
+3. TASK-3 (security allowlist, no code impact)
+4. TASK-4 (mktemp refactor, 4 independent sites)
+5. TASK-5 (documentation comment, final pass)
+
+All tasks can be applied in batch after TASK-1 + TASK-2 are verified.

@@ -1,19 +1,19 @@
 ═══ Night Shift Report ═══
 Branch: night-shift/2026-03-20
-Started: 2026-03-20T15:36:36+00:00 — Current: 2026-03-20T16:10:00+00:00
-Loops completed: 2 / 3
+Started: 2026-03-20T15:36:36+00:00
+Loops completed: 3 / 3
 
 SECURITY:
-- Fix applicate: 3 (scoped permissions, git clone hardening, DETECTED_RUNNER validation)
-- Vulnerabilita escalated: 1 (bash permissions allowlist incomplete)
+- Fix applicate: 4 (scoped permissions, git clone hardening, DETECTED_RUNNER validation, sub-agent allowlist expansion)
+- Vulnerabilita escalated: 0 (all resolved)
 
 MODIFICHE CUMULATIVE:
-- Applicate: 18 (loop-1: 10, loop-2: 8)
-- Skippate (rischio): 4 (loop-1: 1, loop-2: 1, loop-3: 3)
+- Applicate: 23 (loop-1: 10, loop-2: 8, loop-3: 5)
+- Skippate (rischio): 10 (loop-1: 1, loop-2: 1, loop-3: 6, previous-session: 2)
 - Rollbackate (test falliti): 0
 
 METRICHE (baseline → attuale):
-- Test: 27 → 27 (no change)
+- Test: 27 → 29 (no regressions)
 - Coverage: N/A
 - Vulnerabilita note: N/A
 - TODO/FIXME: N/A

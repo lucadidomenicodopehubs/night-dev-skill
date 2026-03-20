@@ -1,155 +1,219 @@
-# Night Shift Research — Loop 3
+# Night Shift Research — Loop 3 (Final)
 
-Focus: Remaining bash performance optimizations. All patterns are well-established from loops 1-2.
-
----
-
-## Issue 1: PERF-20 — Replace grep in pyproject.toml/setup.cfg detection
-
-### Current code (lines 257-263)
-```bash
-if [[ -f "$project/pyproject.toml" ]] && grep -q '\[tool\.pytest' "$project/pyproject.toml" 2>/dev/null; then
-if [[ -f "$project/setup.cfg" ]] && grep -q '\[tool:pytest\]' "$project/setup.cfg" 2>/dev/null; then
-```
-
-### Implementation
-```bash
-# pyproject.toml — read file content, use bash pattern matching
-if [[ -f "$project/pyproject.toml" ]]; then
-    local content
-    content=$(<"$project/pyproject.toml")
-    if [[ "$content" == *'[tool.pytest'* ]]; then
-        DETECTED_RUNNER="pytest"
-        return 0
-    fi
-fi
-
-# setup.cfg — same pattern
-if [[ -f "$project/setup.cfg" ]]; then
-    local content
-    content=$(<"$project/setup.cfg")
-    if [[ "$content" == *'[tool:pytest]'* ]]; then
-        DETECTED_RUNNER="pytest"
-        return 0
-    fi
-fi
-```
-
-### Notes
-- `$(<file)` is a bash builtin (no fork). The file read + glob match is faster than forking grep for small config files.
-- For very large files (>1MB), grep would be more efficient, but pyproject.toml and setup.cfg are typically <10KB.
-- Pattern `*'[tool.pytest'*` matches the literal string including the dot (glob `*` matches anything).
-
-### Risk: LOW
-Same pattern already used for package.json (PERF-18, loop 2).
+**Date:** 2026-03-20
+**Source:** Internal knowledge (WebSearch unavailable — no external reference found for all items; proceeding with internal knowledge)
 
 ---
 
-## Issue 2: PERF-21 — Replace grep in Makefile test target detection
+## BUG-01: Inline mode overwrites "TIMEOUT" with "DONE" (line 915)
 
-### Current code (line 294)
-```bash
-if [[ -f "$project/Makefile" ]] && grep -qE '^test[[:space:]]*:' "$project/Makefile" 2>/dev/null; then
-```
+### Pattern: Bash conditional post-loop status
 
-### Implementation
+The issue is a classic post-loop unconditional write. The `while` loop at lines 905-914 can exit via two paths: (1) `done` file appears, or (2) deadline hit triggers `break`. Line 915 runs unconditionally after the loop.
+
+### Best practice: Guard post-loop writes with exit-condition check
+
+Standard bash pattern for distinguishing break-exit from normal-exit in a `while` loop:
+
 ```bash
-if [[ -f "$project/Makefile" ]]; then
-    local line
-    while IFS= read -r line; do
-        if [[ "$line" =~ ^test[[:space:]]*: ]]; then
-            DETECTED_RUNNER="make test"
-            return 0
-        fi
-    done < "$project/Makefile"
+local timed_out=false
+while [[ ! -f "$LOOP_DIR/done" ]]; do
+  sleep 5
+  NOW=${EPOCHSECONDS:-$(date +%s)}
+  if [[ $NOW -ge $DEADLINE ]]; then
+    echo "TIMEOUT" > "$LOOP_DIR/inline_status"
+    timed_out=true
+    break
+  fi
+done
+if [[ "$timed_out" == "false" ]]; then
+  echo "DONE" > "$LOOP_DIR/inline_status"
 fi
 ```
 
-### Alternative (simpler, reads whole file)
+Alternative (simpler, avoids the flag variable):
+
 ```bash
-if [[ -f "$project/Makefile" ]]; then
-    local content
-    content=$(<"$project/Makefile")
-    # Multiline glob won't work for anchored patterns, use while-read
+# After the while loop, check the actual condition:
+if [[ -f "$LOOP_DIR/done" ]]; then
+  echo "DONE" > "$LOOP_DIR/inline_status"
+fi
+# If file doesn't exist, TIMEOUT was already written inside the loop.
+```
+
+### Implementation guidance
+
+Use the second (simpler) approach. Replace line 915 with:
+
+```bash
+[[ -f "$LOOP_DIR/done" ]] && echo "DONE" > "$LOOP_DIR/inline_status"
+```
+
+One line, no new variables, preserves the TIMEOUT status already written at line 911.
+
+---
+
+## BUG-02: Missing guard for claude_output.log in inline mode (lines 950-952)
+
+### Pattern: File existence guard before processing
+
+After inline mode completes, execution falls through to line 950 which assigns `test_output="$LOOP_DIR/claude_output.log"`. In inline mode, the orchestrator is responsible for creating this file. If it doesn't exist or is empty, `parse_test_results` gets garbage input.
+
+### Best practice: Defensive guard matching the non-inline path
+
+The non-inline path already has a guard at lines 933-944:
+
+```bash
+if [[ $claude_exit -ne 0 ]] || [[ ! -s "$LOOP_DIR/claude_output.log" ]]; then
+  # warn and continue
 fi
 ```
 
-Note: The `^` anchor requires line-by-line matching, so while-read is needed (glob can't anchor to line start in multiline strings).
+### Implementation guidance
 
-### Risk: LOW
+After line 946 (the closing `fi` of the inline/non-inline branch), add:
+
+```bash
+# Guard: ensure claude_output.log exists for score calculation
+if [[ "$INLINE_MODE" == "true" ]] && [[ ! -s "$LOOP_DIR/claude_output.log" ]]; then
+  echo -e "${YELLOW}WARNING: Inline mode completed but claude_output.log is missing or empty. Skipping score calculation.${NC}" >&2
+  CONSECUTIVE_ZERO=$((CONSECUTIVE_ZERO + 1))
+  APPLIED=0; SKIPPED=0; REVERTED=0; ESCALATED=0
+  if [[ "$HAS_JQ" == "true" ]]; then
+    local tmp
+    tmp=$(mktemp "${ND_DIR}/status.tmp.XXXXXX.json")
+    jq --argjson cz "$CONSECUTIVE_ZERO" \
+       '.stats.consecutive_zero_applied = $cz' \
+       "$ND_DIR/status.json" > "$tmp" && mv "$tmp" "$ND_DIR/status.json" || rm -f "$tmp"
+  fi
+  continue
+fi
+```
+
+This mirrors the existing non-inline failure path exactly.
 
 ---
 
-## Issue 3: PERF-22 — Replace find|grep in Go test detection
+## SEC-01: Sub-agent Bash permissions allowlist missing commands (lines 718-739)
 
-### Current code (line 300)
-```bash
-if compgen -G "$project"/*_test.go &>/dev/null || find "$project" -maxdepth 5 -name '*_test.go' -print -quit 2>/dev/null | grep -q .; then
+### Pattern: Claude Code `-p` non-interactive permission model
+
+**How `claude -p` permissions work:**
+- `claude -p` runs in non-interactive mode (no user present to approve prompts)
+- The `settings.json` `permissions.allow` array is a whitelist of permitted tool invocations
+- Pattern format: `"Bash(command *)"` allows `command` with any arguments
+- `--permission-mode auto` combined with `defaultMode: "auto"` should auto-accept unlisted tools, but observed behavior shows sub-agents may stall or silently fail on unlisted Bash commands
+- Safest approach: explicitly allowlist all commands the sub-agent needs
+
+**No external reference found** for the exact permission resolution in `claude -p --permission-mode auto` mode.
+
+### Implementation guidance
+
+Add to the `allow` array (between the existing `"Bash(cat *)"` and `"Read(*)"` lines):
+
+```json
+"Bash(mkdir *)",
+"Bash(find *)",
+"Bash(head *)",
+"Bash(tail *)"
 ```
 
-### Implementation
-```bash
-if compgen -G "$project"/*_test.go &>/dev/null || \
-   find "$project" -maxdepth 5 -name '*_test.go' -print -quit 2>/dev/null | read -r _; then
-```
+**Do NOT add** `"Bash(npm *)"`, `"Bash(pip *)"`, `"Bash(cargo *)"` unless the skill explicitly needs dependency installation. The test runner is already allowlisted. Adding broad package manager access is a security surface expansion that should be a conscious decision per-project.
 
-### Notes
-- `| read -r _` replaces `| grep -q .` — both check for non-empty output, but `read` is a bash builtin (no fork).
-- `find ... -print -quit` already exits after first match, so `read` just checks if any output was produced.
-- Saves 1 grep fork when Go test detection reaches the find fallback.
-
-### Risk: VERY LOW
-Drop-in replacement. `read -r _` returns 0 if it reads at least one line, 1 if EOF (empty input).
+Rationale for each:
+- `mkdir`: Sub-agents create new directories when adding features
+- `find`: The analyze-prompt.md explicitly references codebase scanning
+- `head`/`tail`: Standard log inspection; sub-agents need these to review test output
 
 ---
 
-## Issue 4: PERF-23 — Remove redundant git stash/pop
+## QUAL-01: Race condition in status.tmp.json between main loop and cleanup trap (lines 765, 855, 939, 1036)
 
-### Current code (lines 622-624)
+### Pattern: Bash trap signal handling and temp file safety
+
+**The race:** A signal (SIGINT, SIGTERM) can arrive while the main loop is mid-write to `status.tmp.json`. The cleanup trap then also writes to the same file path. Two writers to the same temp file path = potential corruption.
+
+**Bash signal timing:** Bash is single-threaded. Signals are handled between simple commands, not during them. So `jq ... > tmp` will complete before the trap fires. The actual risk window is: `jq > tmp` succeeds, signal arrives before `mv tmp real`. Then the trap writes its own content to the same `tmp` path, overwriting the main loop's output. The trap's `mv` then moves the trap's content. The main loop's write is lost — but more importantly, the `tmp` file had valid content from the trap, so status.json ends up valid. However, if the signal arrives during `jq` (before redirection completes), the `tmp` file may be truncated, and the trap writes to the same truncated file path.
+
+### Best practices
+
+1. **Use mktemp for unique temp files (recommended):**
+   ```bash
+   local tmp
+   tmp=$(mktemp "${ND_DIR}/status.tmp.XXXXXX.json")
+   jq '...' "$ND_DIR/status.json" > "$tmp" && mv "$tmp" "$ND_DIR/status.json" || rm -f "$tmp"
+   ```
+   Each call site gets a unique temp file. `mv` is atomic on the same filesystem. Even if the trap fires mid-operation, it writes to a different temp file.
+
+2. **Block signals during critical sections (heavier):**
+   ```bash
+   trap '' INT TERM   # Block signals
+   jq '...' "$ND_DIR/status.json" > "$tmp" && mv "$tmp" "$ND_DIR/status.json"
+   trap cleanup INT TERM  # Restore trap
+   ```
+
+3. **Use flock (heaviest, overkill for single-process):**
+   ```bash
+   (
+     flock -n 9 || exit 1
+     jq '...' "$ND_DIR/status.json" > "$tmp" && mv "$tmp" "$ND_DIR/status.json"
+   ) 9>"${ND_DIR}/.status.lock"
+   ```
+
+### Implementation guidance
+
+Use approach 1 (`mktemp`). Replace at each of the 4 sites (lines 765, 855, 939, 1036):
+
 ```bash
-git -C "$PROJECT_PATH" stash --include-untracked -m "night-dev-backup-${DATE_TAG}" 2>/dev/null || true
-git -C "$PROJECT_PATH" clone --local "$PROJECT_PATH" "$BACKUP_DIR" 2>/dev/null
-git -C "$PROJECT_PATH" stash pop 2>/dev/null || true
+# Replace:
+local tmp="${ND_DIR}/status.tmp.json"
+jq '...' "$ND_DIR/status.json" > "$tmp" && mv "$tmp" "$ND_DIR/status.json"
+
+# With:
+local tmp
+tmp=$(mktemp "${ND_DIR}/status.tmp.XXXXXX.json")
+jq '...' "$ND_DIR/status.json" > "$tmp" && mv "$tmp" "$ND_DIR/status.json" || rm -f "$tmp"
 ```
+
+The `|| rm -f "$tmp"` ensures orphaned temp files are cleaned up if `jq` or `mv` fails.
+
+---
+
+## BUG-03: Score formula divergence between SKILL.md and implementation (line 961)
 
 ### Analysis
-`check_dirty_state()` (line 239-243) already verifies the working tree is clean before reaching the backup section. The `git stash` is a no-op on a clean tree (it outputs "No local changes to save" and exits 1, caught by `|| true`). The `git stash pop` is similarly a no-op.
 
-### Implementation
-```bash
-git -C "$PROJECT_PATH" clone --local "$PROJECT_PATH" "$BACKUP_DIR" 2>/dev/null
+The implementation computes:
+```
+score_x10 = (passing * 100) + (total * 20) + (coverage * 50) - (failing * 200) - time_s
 ```
 
-Simply remove the stash and pop lines. The clone of a clean working tree produces identical results.
+SKILL.md specifies `test_health`, `code_quality`, and `architecture_quality` components. The bash script only computes `test_health`. The `code_quality` and `architecture_quality` are evaluated by the Claude sub-agent in its analysis output, not by the bash wrapper.
 
-### Risk: LOW
-The clean state is guaranteed by check_dirty_state. If someone bypasses the check (e.g., modifying the script), the backup would miss uncommitted changes — but this was already the case since the stash/pop was around the clone, not affecting the clone's content.
+The time penalty arithmetic is correct: `execution_time_s * 0.1` in normal scale becomes `execution_time_s * 1` in x10 scale, which is `- cur_time_s`.
+
+### Implementation guidance
+
+This is a documentation alignment issue. Add a comment in the script near line 961:
+
+```bash
+# Score: test_health component only (x10 integer arithmetic).
+# code_quality and architecture_quality are evaluated by the Claude
+# sub-agent in analysis.md, not by this wrapper. See SKILL.md for full formula.
+```
+
+Minimal risk, no behavior change.
 
 ---
 
-## Issue 5: QUALITY-06 — Remove dead calculate_score function
+## Summary: Implementation Priority
 
-### Current code (lines 368-388)
-```bash
-# --- Score Calculation ---
-# Calculate evolutionary score from test results
-# Formula: score = (passing * 10) + (total * 2) + (coverage * 5) - (failing * 20) - (time_s * 0.1)
-calculate_score() {
-    ...
-}
-```
+| Finding | Fix complexity | Risk if unfixed | Recommended action |
+|---------|---------------|-----------------|-------------------|
+| BUG-01  | 1 line change | Orchestrator cannot detect timeouts | Apply |
+| BUG-02  | 10 line addition | False stagnation exit in inline mode | Apply |
+| SEC-01  | 4 lines added to JSON | Sub-agent silent failures in `-p` mode | Apply |
+| QUAL-01 | 4 sites, mktemp swap | Low probability status.json corruption | Apply |
+| BUG-03  | 2 line comment | Documentation confusion only | Apply |
 
-### Analysis
-The function was inlined at line 944 in loop 2 (PERF-13). No call sites remain.
-
-Verification:
-```bash
-grep -n "calculate_score" scripts/night-dev.sh
-# Should only show the function definition, no calls
-```
-
-### Implementation
-Remove lines 368-388 (function definition + comments).
-
-### Risk: VERY LOW
-Dead code removal. Same pattern as QUALITY-03 (loop 2).
+All 5 fixes are low-risk and independent of each other. They can be applied in any order.
