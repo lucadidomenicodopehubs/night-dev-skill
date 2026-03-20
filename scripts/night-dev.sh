@@ -253,16 +253,24 @@ detect_test_runner() {
         return 0
     fi
 
-    # Python: pyproject.toml [tool.pytest]
-    if [[ -f "$project/pyproject.toml" ]] && grep -q '\[tool\.pytest' "$project/pyproject.toml" 2>/dev/null; then
-        DETECTED_RUNNER="pytest"
-        return 0
+    # Python: pyproject.toml [tool.pytest] — pure bash, no grep fork
+    if [[ -f "$project/pyproject.toml" ]]; then
+        local content
+        content=$(<"$project/pyproject.toml")
+        if [[ "$content" == *'[tool.pytest'* ]]; then
+            DETECTED_RUNNER="pytest"
+            return 0
+        fi
     fi
 
-    # Python: setup.cfg [tool:pytest]
-    if [[ -f "$project/setup.cfg" ]] && grep -q '\[tool:pytest\]' "$project/setup.cfg" 2>/dev/null; then
-        DETECTED_RUNNER="pytest"
-        return 0
+    # Python: setup.cfg [tool:pytest] — pure bash, no grep fork
+    if [[ -f "$project/setup.cfg" ]]; then
+        local content
+        content=$(<"$project/setup.cfg")
+        if [[ "$content" == *'[tool:pytest]'* ]]; then
+            DETECTED_RUNNER="pytest"
+            return 0
+        fi
     fi
 
     # Python: tox.ini
@@ -291,13 +299,19 @@ detect_test_runner() {
     fi
 
     # Generic: Makefile with test target (checked before Go to avoid expensive find)
-    if [[ -f "$project/Makefile" ]] && grep -qE '^test[[:space:]]*:' "$project/Makefile" 2>/dev/null; then
-        DETECTED_RUNNER="make test"
-        return 0
+    # Pure bash line-by-line regex — no grep fork
+    if [[ -f "$project/Makefile" ]]; then
+        local line
+        while IFS= read -r line; do
+            if [[ "$line" =~ ^test[[:space:]]*: ]]; then
+                DETECTED_RUNNER="make test"
+                return 0
+            fi
+        done < "$project/Makefile"
     fi
 
     # Go: *_test.go files (check root and subdirectories)
-    if compgen -G "$project"/*_test.go &>/dev/null || find "$project" -maxdepth 5 -name '*_test.go' -print -quit 2>/dev/null | grep -q .; then
+    if compgen -G "$project"/*_test.go &>/dev/null || find "$project" -maxdepth 5 -name '*_test.go' -print -quit 2>/dev/null | read -r _; then
         DETECTED_RUNNER="go test ./..."
         return 0
     fi
@@ -364,28 +378,6 @@ readonly _PARSE_AWK_SCRIPT='
         print p, f, t, c, d
     }
 '
-
-# --- Score Calculation ---
-# Calculate evolutionary score from test results
-# Formula: score = (passing * 10) + (total * 2) + (coverage * 5) - (failing * 20) - (time_s * 0.1)
-calculate_score() {
-    local passing="${1:-0}"
-    local failing="${2:-0}"
-    local total="${3:-0}"
-    local coverage="${4:-0}"
-    local time_s="${5:-0}"
-
-    # Bash doesn't do floating point, so we multiply by 10 for precision then divide
-    # score = (passing * 10) + (total * 2) + (coverage * 5) - (failing * 20) - (time_s * 0.1)
-    # In integer math with *10 scale: (passing*100) + (total*20) + (coverage*50) - (failing*200) - (time_s*1) / 10
-    local score_x10=$(( (passing * 100) + (total * 20) + (coverage * 50) - (failing * 200) - time_s ))
-    local score=$((score_x10 / 10))
-    local remainder=$((score_x10 % 10))
-    if [[ $remainder -lt 0 ]]; then
-        remainder=$(( -remainder ))
-    fi
-    echo "${score}.${remainder}"
-}
 
 # Parse test results from a test output file and extract counts
 # Single-pass awk: tries pytest, jest, cargo patterns + coverage + duration in one invocation
@@ -619,9 +611,8 @@ main() {
         rm -rf "$BACKUP_DIR"
     fi
     echo -e "${CYAN}Creating pre-run backup...${NC}"
-    git -C "$PROJECT_PATH" stash --include-untracked -m "night-dev-backup-${DATE_TAG}" 2>/dev/null || true
+    # check_dirty_state guarantees clean worktree — no stash needed
     git -C "$PROJECT_PATH" clone --local "$PROJECT_PATH" "$BACKUP_DIR" 2>/dev/null
-    git -C "$PROJECT_PATH" stash pop 2>/dev/null || true
     echo -e "${GREEN}Backup created: ${BACKUP_DIR}${NC}"
     echo -e "${GREEN}To restore: rm -rf ${PROJECT_PATH} && mv ${BACKUP_DIR} ${PROJECT_PATH}${NC}"
 
