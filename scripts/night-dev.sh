@@ -826,6 +826,8 @@ EOSETTINGS
     CONSECUTIVE_ZERO=0
     CONSECUTIVE_NO_IMPROVEMENT=0
     PREVIOUS_SCORE="0.0"
+    CACHED_PREV_APPLIED=""
+    CACHED_PREV_REVERTED=""
 
     while true; do
       CURRENT_LOOP=$((CURRENT_LOOP + 1))
@@ -857,14 +859,9 @@ EOSETTINGS
       fi
 
       # Exit: diminishing returns (previous loop applied 0 changes without reverts = nothing left)
-      if [[ $CURRENT_LOOP -gt 1 ]] && [[ -f "$ND_DIR/loop-$((CURRENT_LOOP - 1))/changelog.md" ]]; then
-        local prev_changelog_cached
-        prev_changelog_cached=$(<"$ND_DIR/loop-$((CURRENT_LOOP - 1))/changelog.md")
-        local prev_counts
-        prev_counts=$(awk '/^[[:space:]]*[-*][[:space:]]+APPLICATA[[:space:]]*:/{a++} /^[[:space:]]*[-*][[:space:]]+REVERTITA[[:space:]]*:/{r++} END{print a+0, r+0}' <<< "$prev_changelog_cached")
-        local prev_loop_applied prev_loop_reverted
-        read -r prev_loop_applied prev_loop_reverted <<< "$prev_counts"
-        if [[ "${prev_loop_applied:-0}" -eq 0 ]] && [[ "${prev_loop_reverted:-0}" -eq 0 ]]; then
+      # Uses cached counts from previous loop's changelog parse (avoids re-parsing with awk)
+      if [[ $CURRENT_LOOP -gt 1 ]] && [[ -n "$CACHED_PREV_APPLIED" ]]; then
+        if [[ "$CACHED_PREV_APPLIED" -eq 0 ]] && [[ "$CACHED_PREV_REVERTED" -eq 0 ]]; then
           echo "Early exit: previous loop found nothing to improve. Stopping." >&2
           break
         fi
@@ -894,9 +891,11 @@ EOSETTINGS
       IS_FIRST_LOOP="false"
       [[ $CURRENT_LOOP -eq 1 ]] && IS_FIRST_LOOP="true"
 
-      # Build prompt for Claude
+      # Build prompt for Claude — read previous changelog for context
       PREV_CHANGELOG=""
-      if [[ $CURRENT_LOOP -gt 1 ]] && [[ -n "${prev_changelog_cached:-}" ]]; then
+      if [[ $CURRENT_LOOP -gt 1 ]] && [[ -f "$ND_DIR/loop-$((CURRENT_LOOP - 1))/changelog.md" ]]; then
+        local prev_changelog_cached
+        prev_changelog_cached=$(<"$ND_DIR/loop-$((CURRENT_LOOP - 1))/changelog.md")
         PREV_CHANGELOG="Previous loop changelog:
 ${prev_changelog_cached}"
       fi
@@ -1005,6 +1004,10 @@ ${SKILL_CONTENT}
           END{print a+0, s+0, r+0, e+0}
         ' "$LOOP_DIR/changelog.md")
         read -r APPLIED SKIPPED REVERTED ESCALATED <<< "$changelog_counts"
+
+        # Cache for next iteration's early-exit check (avoids re-parsing)
+        CACHED_PREV_APPLIED="$APPLIED"
+        CACHED_PREV_REVERTED="$REVERTED"
 
         echo "Loop $CURRENT_LOOP results: applied=$APPLIED, skipped=$SKIPPED, reverted=$REVERTED, escalated=$ESCALATED"
 
