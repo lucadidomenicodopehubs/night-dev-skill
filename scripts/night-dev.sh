@@ -726,6 +726,10 @@ main() {
       "Bash(ls *)",
       "Bash(wc *)",
       "Bash(cat *)",
+      "Bash(mkdir *)",
+      "Bash(find *)",
+      "Bash(head *)",
+      "Bash(tail *)",
       "Read(*)",
       "Write(*)",
       "Edit(*)",
@@ -762,8 +766,8 @@ EOSETTINGS
         if [[ "${_CIRCUIT_BREAKER_TRIGGERED:-false}" == "true" ]]; then
           jq_cleanup='.circuit_breaker = "OPEN" | .phase = "COMPLETED"'
         fi
-        local tmp="${ND_DIR}/status.tmp.json"
-        jq "$jq_cleanup" "$ND_DIR/status.json" > "$tmp" && mv "$tmp" "$ND_DIR/status.json"
+        local tmp; tmp=$(mktemp "${ND_DIR}/status.tmp.XXXXXX.json")
+        jq "$jq_cleanup" "$ND_DIR/status.json" > "$tmp" && mv "$tmp" "$ND_DIR/status.json" || rm -f "$tmp"
         local final_score
         final_score=$(jq -r '.current_tests.score // "N/A"' "$ND_DIR/status.json" 2>/dev/null)
         echo "Final score: $final_score"
@@ -852,10 +856,10 @@ ${SKILL_CONTENT}
 
       # Update status (batched single jq call — sets phase directly to RUNNING CLAUDE)
       if [[ "$HAS_JQ" == "true" ]]; then
-        local tmp="${ND_DIR}/status.tmp.json"
+        local tmp; tmp=$(mktemp "${ND_DIR}/status.tmp.XXXXXX.json")
         jq --argjson cl "$CURRENT_LOOP" --arg ph "LOOP $CURRENT_LOOP — RUNNING CLAUDE" \
           '.current_loop = $cl | .phase = $ph' \
-          "$ND_DIR/status.json" > "$tmp" && mv "$tmp" "$ND_DIR/status.json"
+          "$ND_DIR/status.json" > "$tmp" && mv "$tmp" "$ND_DIR/status.json" || rm -f "$tmp"
       fi
 
       REMAINING_SECS=$((DEADLINE - NOW))
@@ -912,7 +916,22 @@ ${PREV_CHANGELOG}"
             break
           fi
         done
-        echo "DONE" > "$LOOP_DIR/inline_status"
+        # Only write DONE if the loop completed normally (not on TIMEOUT)
+        [[ -f "$LOOP_DIR/done" ]] && echo "DONE" > "$LOOP_DIR/inline_status"
+
+        # Guard: inline mode may finish without producing claude_output.log
+        if [[ ! -s "$LOOP_DIR/claude_output.log" ]]; then
+          echo -e "${YELLOW}WARNING: Inline mode produced no output. Skipping score calculation.${NC}" >&2
+          CONSECUTIVE_ZERO=$((CONSECUTIVE_ZERO + 1))
+          APPLIED=0; SKIPPED=0; REVERTED=0; ESCALATED=0
+          if [[ "$HAS_JQ" == "true" ]]; then
+            local tmp; tmp=$(mktemp "${ND_DIR}/status.tmp.XXXXXX.json")
+            jq --argjson cz "$CONSECUTIVE_ZERO" \
+               '.stats.consecutive_zero_applied = $cz' \
+               "$ND_DIR/status.json" > "$tmp" && mv "$tmp" "$ND_DIR/status.json" || rm -f "$tmp"
+          fi
+          continue
+        fi
       else
         echo "Invoking Claude for loop $CURRENT_LOOP..."
         local claude_cmd=(claude -p "$LOOP_PROMPT" --max-turns "$MAX_CLAUDE_TURNS" --permission-mode auto)
@@ -936,10 +955,10 @@ ${PREV_CHANGELOG}"
           APPLIED=0; SKIPPED=0; REVERTED=0; ESCALATED=0
           # Persist consecutive_zero to status.json so it survives script kill between loops
           if [[ "$HAS_JQ" == "true" ]]; then
-            local tmp="${ND_DIR}/status.tmp.json"
+            local tmp; tmp=$(mktemp "${ND_DIR}/status.tmp.XXXXXX.json")
             jq --argjson cz "$CONSECUTIVE_ZERO" \
                '.stats.consecutive_zero_applied = $cz' \
-               "$ND_DIR/status.json" > "$tmp" && mv "$tmp" "$ND_DIR/status.json"
+               "$ND_DIR/status.json" > "$tmp" && mv "$tmp" "$ND_DIR/status.json" || rm -f "$tmp"
           fi
           continue
         fi
@@ -957,7 +976,9 @@ ${PREV_CHANGELOG}"
       local cur_passing cur_failing cur_total cur_coverage cur_time_s
       read -r cur_passing cur_failing cur_total cur_coverage cur_time_s <<< "$test_data"
 
-      # Inline score arithmetic (avoids subshell fork to calculate_score)
+      # Inline score arithmetic — computes test_health only.
+      # code_quality and architecture_quality (per SKILL.md) are evaluated by
+      # the Claude sub-agent in analysis.md, not by this bash wrapper.
       local score_x10=$(( (cur_passing * 100) + (cur_total * 20) + (cur_coverage * 50) - (cur_failing * 200) - cur_time_s ))
       local sign="" abs_score_x10=$score_x10
       if [[ $score_x10 -lt 0 ]]; then
@@ -1033,7 +1054,7 @@ ${PREV_CHANGELOG}"
 
       # Batched status.json update — single jq call for scores, history, and stats
       if [[ "$HAS_JQ" == "true" ]]; then
-        local tmp="${ND_DIR}/status.tmp.json"
+        local tmp; tmp=$(mktemp "${ND_DIR}/status.tmp.XXXXXX.json")
         local jq_expr='.current_tests = {passing: $p, failing: $f, total: $t, coverage: $c, time_s: $ts, score: $s}
           | .score_history += [{loop: $l, score: $s}]
           | .stats.total_applied += $a
@@ -1051,7 +1072,7 @@ ${PREV_CHANGELOG}"
            --argjson a "${APPLIED:-0}" --argjson sk "${SKIPPED:-0}" \
            --argjson r "${REVERTED:-0}" --argjson e "${ESCALATED:-0}" \
            --argjson cz "$CONSECUTIVE_ZERO" \
-           "$jq_expr" "$ND_DIR/status.json" > "$tmp" && mv "$tmp" "$ND_DIR/status.json"
+           "$jq_expr" "$ND_DIR/status.json" > "$tmp" && mv "$tmp" "$ND_DIR/status.json" || rm -f "$tmp"
       fi
 
       # --- Push to remote if --push enabled ---
