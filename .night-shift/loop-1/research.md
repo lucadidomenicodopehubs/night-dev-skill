@@ -1,226 +1,378 @@
 # Night Shift Research — Loop 1
 
-## Summary
-- Findings researched: 4 of 4 requested
-- External references found: 0 (WebSearch unavailable — all findings use internal knowledge)
+**Date:** 2026-03-20
+**Issues Researched:** 10
+**External Sources Found:** 0 (WebSearch unavailable — permissions not granted)
+**Internal Knowledge Applied:** 10/10
 
 ---
 
-## Finding 1: PERF-01 — Batch multiple jq calls into one compound expression
-**Category:** performance
-**Search queries used:** "jq batch multiple updates single invocation compound expression best practice" (WebSearch unavailable)
+## SEC-01 [MEDIUM] — Wildcard permissions in .claude/settings.json (prompt injection risk)
 
-### Solution (recommended)
-- **Source:** internal knowledge (jq manual: pipe operator and multiple updates)
-- **Reliability:** high — standard jq idiom, well-documented in jq manual
-- **Implementation approach:**
+**Category:** SECURITY
+**Severity:** MEDIUM
+**Search Queries Attempted:** `bash script .claude settings.json wildcard permissions security prompt injection mitigation`
 
-The loop body currently makes 3 separate jq read-write cycles per iteration (lines 901, 1002, 1003, and 1047). Merge them into a single jq call at the end of each loop iteration.
+### Analysis
 
-Replace the three separate calls (`update_score`, `append_score_history`, and the stats batch) with one unified call:
+The file at line 712-727 grants `Bash(*)`, `Read(*)`, `Write(*)`, `Edit(*)` with `defaultMode: auto`. This means any content within the analyzed project (comments, test data, documentation) could contain prompt injection payloads that instruct the Claude sub-agent to execute arbitrary commands.
 
-```bash
-# Single jq call per loop — replaces update_score + append_score_history + stats update
-if [[ "$HAS_JQ" == "true" ]]; then
-  local tmp="${ND_DIR}/status.tmp.json"
-  jq \
-    --argjson cp "$cur_passing" --argjson cf "$cur_failing" --argjson ct "$cur_total" \
-    --argjson cc "$cur_coverage" --argjson cts "$cur_time_s" --arg cs "$current_score" \
-    --argjson cl "$CURRENT_LOOP" \
-    --argjson a "$APPLIED" --argjson s "$SKIPPED" \
-    --argjson r "$REVERTED" --argjson e "$ESCALATED" \
-    --argjson cz "$CONSECUTIVE_ZERO" \
-    --arg ph "LOOP $CURRENT_LOOP — SCORING" \
-    '
-    .phase = $ph |
-    .current_tests = {passing: $cp, failing: $cf, total: $ct, coverage: $cc, time_s: $cts, score: $cs} |
-    .score_history += [{loop: $cl, score: $cs}] |
-    .stats.total_applied += $a |
-    .stats.total_skipped += $s |
-    .stats.total_reverted += $r |
-    .stats.total_escalated += $e |
-    .stats.consecutive_zero_applied = $cz
-    ' "$ND_DIR/status.json" > "$tmp" && mv "$tmp" "$ND_DIR/status.json"
-fi
-```
+### Solutions
 
-Key jq principle: the `|` operator pipes the result of one filter to the next, so chaining `.field = $val | .other = $val2` applies all mutations in a single process. This eliminates 2-3 subprocess forks and 2-3 file read-write cycles per loop iteration (10-15 total across 5 loops).
+**Source:** Internal knowledge (principle of least privilege, defense in depth)
+**Date:** N/A
+**Reliability:** HIGH (well-established security principle)
+**Summary:** The principle of least privilege dictates that permissions should be scoped to the minimum necessary. For an autonomous coding agent, `Bash` should be restricted to the specific commands needed (test runners, git, build tools). `Write` and `Edit` should ideally be scoped to the worktree path. `Read` is lower risk but could still be scoped.
 
-The phase update at line 901 should remain separate since it runs before the Claude agent invocation (it signals "RUNNING CLAUDE" to the follow mode).
-
----
-
-## Finding 2: PERF-05 — Pure bash float comparison without awk
-**Category:** performance
-**Search queries used:** "bash pure float comparison without awk decimal number compare" (WebSearch unavailable)
-
-### Solution (recommended)
-- **Source:** internal knowledge (bash string manipulation and integer arithmetic)
-- **Reliability:** high — standard bash technique, no external dependencies
-- **Implementation approach:**
-
-Replace line 1007:
-```bash
-improved=$(awk -v cur="$current_score" -v prev="$PREVIOUS_SCORE" 'BEGIN { print (cur > prev) ? "yes" : "no" }')
-```
-
-With pure bash using integer-scaled comparison. The scores are in `X.Y` format (one decimal place, as produced by `calculate_score`). Split on `.` and compare as scaled integers:
-
-```bash
-# Pure bash float comparison — no subprocess fork
-local cur_int="${current_score%%.*}" cur_frac="${current_score#*.}"
-local prev_int="${PREVIOUS_SCORE%%.*}" prev_frac="${PREVIOUS_SCORE#*.}"
-# Handle whole numbers with no decimal point
-[[ "$cur_int" == "$current_score" ]] && cur_frac=0
-[[ "$prev_int" == "$PREVIOUS_SCORE" ]] && prev_frac=0
-# Pad fractions to single digit (scores use 1 decimal place)
-local cur_scaled=$(( cur_int * 10 + ${cur_frac:0:1} ))
-local prev_scaled=$(( prev_int * 10 + ${prev_frac:0:1} ))
-# Handle negative scores: bash integer math handles sign correctly since
-# the integer part carries the sign (-1 * 10 + 5 = -5 vs -2 * 10 + 3 = -17)
-# Actually for negatives we need: -1.5 -> -(1*10+5) = -15
-if [[ "$current_score" == -* ]]; then
-  cur_scaled=$(( cur_int * 10 - ${cur_frac:0:1} ))
-fi
-if [[ "$PREVIOUS_SCORE" == -* ]]; then
-  prev_scaled=$(( prev_int * 10 - ${prev_frac:0:1} ))
-fi
-if (( cur_scaled > prev_scaled )); then
-  improved=yes
-else
-  improved=no
-fi
-```
-
-Simpler alternative (since scores are always non-negative in practice — `calculate_score` clamps output):
-
-```bash
-local cur_scaled=$(( ${current_score%%.*} * 10 + ${current_score#*.} ))
-local prev_scaled=$(( ${PREVIOUS_SCORE%%.*} * 10 + ${PREVIOUS_SCORE#*.} ))
-[[ $cur_scaled -gt $prev_scaled ]] && improved=yes || improved=no
-```
-
-This eliminates 1 awk subprocess fork per loop iteration.
-
----
-
-## Finding 3: PERF-06 — Combine multiple awk pattern-matching passes into single script
-**Category:** performance
-**Search queries used:** "combine multiple awk passes into single awk script multiple patterns one pass" (WebSearch unavailable)
-
-### Solution (recommended)
-- **Source:** internal knowledge (awk programming — multi-pattern single-pass processing)
-- **Reliability:** high — fundamental awk design pattern
-- **Implementation approach:**
-
-Replace the 4-5 sequential awk calls in `parse_test_results()` (lines 371, 382, 394, 406, 418) with a single awk invocation that tries all patterns in one pass and outputs all values on one line:
-
-```bash
-parse_test_results() {
-    local test_output_file="$1"
-    if [[ ! -f "$test_output_file" ]]; then
-        echo "0 0 0 0 0"
-        return
-    fi
-
-    local result
-    result=$(awk '
-    # pytest-style: "X passed, Y failed"
-    /passed/ { for(i=1;i<=NF;i++) if($(i+1)=="passed") pytest_p=$i }
-    /failed/ { for(i=1;i<=NF;i++) if($(i+1)=="failed") pytest_f=$i }
-
-    # jest/vitest-style: "Tests: X passed, Y failed, Z total"
-    /Tests:.*passed/ {
-        for(i=1;i<=NF;i++) {
-            if($(i+1)=="passed,") jest_p=$i
-            if($(i+1)=="failed,") jest_f=$i
-            if($(i+1)=="total") jest_t=$i
-        }
-    }
-
-    # cargo test: "test result: ok. X passed; Y failed"
-    /test result:/ {
-        for(i=1;i<=NF;i++) {
-            if($(i+1)=="passed;") cargo_p=$i
-            if($(i+1)~/^failed/) cargo_f=$i
-        }
-    }
-
-    # Coverage: line containing a percentage and "cover"
-    /[0-9]+(\.[0-9]+)?%/ && /[Cc]over/ {
-        match($0, /([0-9]+(\.[0-9]+)?)%/, arr)
-        if (arr[1]+0 > 0) cov=arr[1]
-    }
-
-    # Duration: line with seconds and time-related keyword
-    /[0-9]+(\.[0-9]+)?s/ && /[Tt]ime|[Dd]uration|[Ff]inished|[Rr]an/ {
-        match($0, /([0-9]+(\.[0-9]+)?)s/, arr)
-        if (arr[1]+0 > 0) dur=arr[1]
-    }
-
-    END {
-        # Priority: pytest > jest > cargo
-        p=0; f=0; t=0
-        if (pytest_p+0 > 0 || pytest_f+0 > 0) {
-            p=pytest_p+0; f=pytest_f+0; t=p+f
-        } else if (jest_p+0 > 0 || jest_f+0 > 0) {
-            p=jest_p+0; f=jest_f+0; t=(jest_t+0 > 0) ? jest_t+0 : p+f
-        } else if (cargo_p+0 > 0 || cargo_f+0 > 0) {
-            p=cargo_p+0; f=cargo_f+0; t=p+f
-        }
-        printf "%d %d %d %d %d\n", p, f, t, int(cov+0), int(dur+0)
-    }
-    ' < "$test_output_file")
-
-    echo "${result:-0 0 0 0 0}"
+**Recommended approach:**
+Replace the wildcard `Bash(*)` with an explicit allowlist based on the detected test runner and standard dev tools:
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(make *)",
+      "Bash(npm *)",
+      "Bash(git *)",
+      "Bash(cd *)",
+      "Bash(ls *)",
+      "Bash(cat *)",
+      "Read(*)",
+      "Write(*)",
+      "Edit(*)",
+      "Grep(*)",
+      "Glob(*)",
+      "Agent(*)"
+    ],
+    "defaultMode": "auto"
+  }
 }
 ```
+The `Bash` permissions should be dynamically generated based on `$DETECTED_RUNNER`. Since the settings are generated at runtime (line 712), this is straightforward. Keep `Read(*)`, `Write(*)`, `Edit(*)` as wildcards since Claude needs to read/write project files freely, and these are sandboxed to the worktree by Claude's own constraints.
 
-This reduces 4-5 awk forks to 1 per call. The file is read once instead of 4-5 times. The END block applies the same priority logic (pytest > jest > cargo) as the original sequential early-return pattern.
-
-Note: coverage and duration are extracted in the same pass regardless of which test framework matched, which matches the original behavior.
+**Trade-off:** Over-restricting `Bash` may cause the implementation agent to fail when it needs to run unexpected but legitimate commands (e.g., `python -c`, `cargo fmt`). Consider a broader but still bounded allowlist rather than a fully open wildcard.
 
 ---
 
-## Finding 4: PERF-08 — git clone --local hardlinks vs --no-hardlinks safety
-**Category:** performance
-**Search queries used:** "git clone --local hardlinks vs --no-hardlinks safety immutable objects" (WebSearch unavailable)
+## SEC-02 [LOW] — git clone URL validation
 
-### Solution (recommended)
-- **Source:** internal knowledge (git-clone documentation, git object model)
-- **Reliability:** high — well-documented git behavior
-- **Implementation approach:**
+**Category:** SECURITY
+**Severity:** LOW
+**Search Queries Attempted:** `bash git clone URL injection attack prevention validation 2025`
 
-**Background:** When `git clone --local` is used without `--no-hardlinks`, git hardlinks the object files in `.git/objects/` instead of copying them. Git objects are immutable by design — once written, they are never modified (only new objects are created, and `git gc` / `git repack` may delete or consolidate them). This makes hardlinks safe for backup purposes.
+### Analysis
 
-**The concern with hardlinks:** If `git gc` or `git repack` runs on the source repo, it can delete loose objects that were packed into a packfile. The hardlinked copy would then have dangling links. However, for a short-lived backup (the backup exists only during the night-dev run), this risk is negligible.
+The `resolve_project_path` function (line 96) runs `git clone "$input" "$clone_dir"` where `$input` is user-supplied. The existing protections are:
+1. URL must match `https://github.com/` or `git@github.com:` prefix
+2. Repo name validated against `^[a-zA-Z0-9._-]+$`
+3. The variable is properly quoted
 
-**Recommended change on line 648:**
+The main attack vector for git clone injection is `--upload-pack` or other flag injection, but since `$input` is quoted and starts with `https://` or `git@`, it cannot be interpreted as a flag (flags start with `-`).
 
+### Solutions
+
+**Source:** Internal knowledge (git security best practices)
+**Date:** N/A
+**Reliability:** HIGH
+**Summary:** The current protections are adequate. The URL regex prevents path traversal and the quoting prevents word splitting. Git itself validates URLs before cloning.
+
+**Recommended approach:** No changes needed. The audit itself notes "No immediate action needed. Current protections are sufficient." If additional hardening is desired, add `--` before the URL argument to explicitly end flag parsing: `git clone -- "$input" "$clone_dir"`.
+
+---
+
+## PERF-01 / ARCH-01 [HIGH/MEDIUM] — update_status() individual jq calls in cleanup
+
+**Category:** PERFORMANCE / ARCHITECTURE
+**Severity:** HIGH
+**Search Queries Attempted:** `jq batch multiple field updates single call bash performance`
+
+### Analysis
+
+`update_status()` (line 735-741) does a full jq read-modify-write cycle per field. It is called twice in `cleanup()`: line 759 (`circuit_breaker = "OPEN"`) and line 773 (`phase = "COMPLETED"`). Each call forks jq, reads the entire JSON, modifies one field, writes to temp file, and renames. This is 2 unnecessary process forks during cleanup.
+
+The main loop already uses a batched jq call (lines 1006-1027), so the pattern is established.
+
+### Solutions
+
+**Source:** Internal knowledge (jq pipe operator for batch updates)
+**Date:** N/A
+**Reliability:** HIGH (standard jq usage)
+**Summary:** jq supports chaining multiple updates with the pipe operator `|` in a single expression. Replace two `update_status` calls with one jq invocation.
+
+**Recommended approach:**
+Replace the cleanup logic at lines 756-773 with a single batched jq call:
 ```bash
-# Before (forces full copy — doubles disk usage):
-git -C "$PROJECT_PATH" clone --local --no-hardlinks "$PROJECT_PATH" "$BACKUP_DIR" 2>/dev/null
+if [[ "$HAS_JQ" == "true" ]] && [[ -f "$ND_DIR/status.json" ]]; then
+  local tmp="${ND_DIR}/status.tmp.json"
+  local jq_expr='.phase = "COMPLETED"'
+  if [[ "${_CIRCUIT_BREAKER_TRIGGERED:-false}" == "true" ]]; then
+    jq_expr='.circuit_breaker = "OPEN" | .phase = "COMPLETED"'
+  fi
+  local final_score
+  final_score=$(jq -r '.current_tests.score // "N/A"' "$ND_DIR/status.json" 2>/dev/null)
+  echo "Final score: $final_score"
+  jq "$jq_expr" "$ND_DIR/status.json" > "$tmp" && mv "$tmp" "$ND_DIR/status.json"
+fi
+```
+This reduces 2-3 jq forks to 2 (one for reading score, one for writing updates). To reduce further to 1 fork, read the score from the same jq call that does the update, but that adds complexity.
 
-# After (allows hardlinks — halves disk usage, faster):
-git -C "$PROJECT_PATH" clone --local "$PROJECT_PATH" "$BACKUP_DIR" 2>/dev/null
+Alternatively, the `update_status` function itself could be removed entirely since it's now only used in cleanup, and the inline batched approach is cleaner.
+
+---
+
+## BUG-02 [MEDIUM] — Negative score sign loss in formatting
+
+**Category:** BUG
+**Severity:** MEDIUM
+**Search Queries Attempted:** `bash integer division negative numbers sign loss fix`
+
+### Analysis
+
+At line 936-940:
+```bash
+local score_x10=$(( (cur_passing * 100) + ... ))
+local current_score=$(( score_x10 / 10 ))
+local score_remainder=$(( score_x10 % 10 ))
+[[ $score_remainder -lt 0 ]] && score_remainder=$(( -score_remainder ))
+current_score="${current_score}.${score_remainder}"
 ```
 
-Simply remove `--no-hardlinks`. The `--local` flag already implies hardlinking on the same filesystem; removing `--no-hardlinks` allows that default behavior.
+For `score_x10 = -3`: `current_score = -3/10 = 0` (bash truncates toward zero), `score_remainder = -3%10 = -3`, abs = `3`. Result: `0.3`. But the correct value is `-0.3`. The sign is lost because `-3/10` rounds to `0`, not `-1`.
 
-**Alternative — lighter-weight backup:** For even better performance, replace the full clone with `git bundle`:
+This is a well-known behavior of integer division in C/bash: truncation toward zero means negative values between -9 and -1 produce a zero quotient, losing the negative sign.
 
+### Solutions
+
+**Source:** Internal knowledge (bash arithmetic, C99 integer division semantics)
+**Date:** N/A
+**Reliability:** HIGH (well-understood arithmetic behavior)
+**Summary:** Track the sign separately before taking absolute values.
+
+**Recommended approach:**
 ```bash
-git -C "$PROJECT_PATH" bundle create "$BACKUP_DIR.bundle" --all 2>/dev/null
+local score_x10=$(( (cur_passing * 100) + (cur_total * 20) + (cur_coverage * 50) - (cur_failing * 200) - cur_time_s ))
+local sign=""
+local abs_score_x10=$score_x10
+if [[ $score_x10 -lt 0 ]]; then
+  sign="-"
+  abs_score_x10=$(( -score_x10 ))
+fi
+local current_score=$(( abs_score_x10 / 10 ))
+local score_remainder=$(( abs_score_x10 % 10 ))
+current_score="${sign}${current_score}.${score_remainder}"
 ```
 
-This creates a single file containing the full repo history, which is more compact and faster than cloning. To restore: `git clone "$BACKUP_DIR.bundle" "$PROJECT_PATH"`.
+This also fixes the related BUG-03 (score comparison) since the comparison at line 951 uses the formatted string. With sign handled correctly, the comparison `(ci * 10 + ${cf:-0}) > (pi * 10 + ${pf:-0})` will also need updating to handle the sign — or better, keep `score_x10` as an integer for comparison and only format for display.
 
-**Simplest alternative — ref-based restore point:**
+---
 
+## BUG-01 [MEDIUM] — Follow mode picks arbitrary worktree
+
+**Category:** BUG
+**Severity:** MEDIUM
+**Search Queries Attempted:** `bash find sort by modification time most recent file`
+
+### Analysis
+
+At line 454-465, `find` locates `status.json` files and `${worktrees[0]}` is used as "most recent." But `find` returns results in filesystem (inode) order, which is effectively random. With multiple Night Dev instances, the user gets an arbitrary one instead of the most recent.
+
+### Solutions
+
+**Source:** Internal knowledge (POSIX stat, bash sorting)
+**Date:** N/A
+**Reliability:** HIGH (standard POSIX utilities)
+**Summary:** Sort found files by modification time to pick the newest.
+
+**Recommended approach:**
+Replace the find + arbitrary pick with a modification-time-sorted selection:
 ```bash
-git -C "$PROJECT_PATH" tag "night-dev-backup-${DATE_TAG}" HEAD 2>/dev/null
+local newest="" newest_mtime=0
+while IFS= read -r -d '' wt; do
+  local mtime
+  mtime=$(stat -c '%Y' "$wt" 2>/dev/null || stat -f '%m' "$wt" 2>/dev/null || echo 0)
+  if [[ $mtime -gt $newest_mtime ]]; then
+    newest_mtime=$mtime
+    newest="$wt"
+  fi
+done < <(find "$search_path" "$HOME/night-dev-repos" -maxdepth 4 -name "status.json" -path "*/.night-dev/*" -print0 2>/dev/null)
+
+if [[ -z "$newest" ]]; then
+  echo -e "${RED}No Night Dev instances found.${NC}"
+  exit 1
+fi
+local status_file="$newest"
 ```
 
-This creates a lightweight tag as a restore point with zero disk overhead. It does not back up uncommitted changes though, so it should be combined with the existing stash approach. This is the fastest option but provides the least protection (no backup of untracked files not captured by stash).
+Note: `stat -c '%Y'` is GNU/Linux, `stat -f '%m'` is macOS/BSD. The script should try both for portability, or since the project targets Linux (per env), just use `-c '%Y'`.
 
-**Recommendation:** Remove `--no-hardlinks` as the minimal safe change. The backup is short-lived (duration of the night-dev run), and git object immutability makes hardlinks safe for this use case.
+---
+
+## QUALITY-01 [MEDIUM] — Claude CLI error handling too permissive
+
+**Category:** QUALITY
+**Severity:** MEDIUM
+**Search Queries Attempted:** (WebSearch unavailable)
+
+### Analysis
+
+Lines 915-919 use `|| true` to suppress Claude CLI errors. If Claude fails (rate limit, crash, permission error), the script continues with empty/truncated output, potentially computing a zero score that triggers false stagnation detection.
+
+### Solutions
+
+**Source:** Internal knowledge (bash error handling best practices)
+**Date:** N/A
+**Reliability:** HIGH
+**Summary:** Check the exit code and output file size after Claude invocation. An empty or very small output file indicates failure.
+
+**Recommended approach:**
+```bash
+local claude_exit=0
+if [[ "$VERBOSE" == "true" ]]; then
+  (cd "$WORKTREE_PATH" && "${claude_cmd[@]}" 2>"$LOOP_DIR/claude_stderr.log") \
+    | tee "$LOOP_DIR/claude_output.log" || claude_exit=$?
+else
+  (cd "$WORKTREE_PATH" && "${claude_cmd[@]}") \
+    > "$LOOP_DIR/claude_output.log" 2>"$LOOP_DIR/claude_stderr.log" || claude_exit=$?
+fi
+
+# Check for Claude failure
+if [[ $claude_exit -ne 0 ]] || [[ ! -s "$LOOP_DIR/claude_output.log" ]]; then
+  echo "WARNING: Claude invocation failed (exit=$claude_exit). Skipping score calculation for loop $CURRENT_LOOP." >&2
+  if [[ -f "$LOOP_DIR/claude_stderr.log" ]] && [[ -s "$LOOP_DIR/claude_stderr.log" ]]; then
+    tail -5 "$LOOP_DIR/claude_stderr.log" >&2
+  fi
+  CONSECUTIVE_ZERO=$((CONSECUTIVE_ZERO + 1))
+  continue
+fi
+```
+
+The key insight: `|| true` should be replaced with `|| claude_exit=$?` to capture the exit code without aborting the script (since `set -e` may be active). Then check both the exit code and the output file size before proceeding with score calculation.
+
+**Note on tee pipe:** When using `| tee`, the exit code is from `tee`, not from Claude. Use `set -o pipefail` or `${PIPESTATUS[0]}` to capture the upstream exit code.
+
+---
+
+## QUALITY-02 [MEDIUM] — Fragile changelog parsing
+
+**Category:** QUALITY
+**Severity:** MEDIUM
+**Search Queries Attempted:** (WebSearch unavailable)
+
+### Analysis
+
+Lines 964-974 parse the changelog using exact `case` patterns like `*[-\*]\ APPLICATA\ :*`. This requires the report agent to produce output in a very specific format. If the agent uses different bullet characters, bold markers, or extra whitespace, the pattern fails silently (counts stay at zero).
+
+### Solutions
+
+**Source:** Internal knowledge (bash pattern matching, defensive parsing)
+**Date:** N/A
+**Reliability:** HIGH
+**Summary:** Use broader patterns that match the keyword regardless of surrounding formatting.
+
+**Recommended approach:**
+Broaden the case patterns to be more permissive:
+```bash
+case "$_cl_line" in
+  *APPLICATA*)   APPLIED=$((APPLIED + 1)) ;;
+  *SKIPPATA*)    SKIPPED=$((SKIPPED + 1)) ;;
+  *REVERTITA*)   REVERTED=$((REVERTED + 1)) ;;
+  *ESCALATED*|*URGENTE*)  ESCALATED=$((ESCALATED + 1)) ;;
+esac
+```
+
+This is simpler and more resilient. The risk of false positives is low because these are Italian-language keywords (APPLICATA, SKIPPATA, REVERTITA) that are unlikely to appear in normal code discussion. If false positives become an issue, add a line-start anchor by checking the line starts with a list marker: `[[ "$_cl_line" =~ ^[[:space:]]*[-\*+] ]]` before the case statement.
+
+---
+
+## PERF-02 [MEDIUM] — package.json line-by-line parsing
+
+**Category:** PERFORMANCE
+**Severity:** MEDIUM
+**Search Queries Attempted:** (WebSearch unavailable)
+
+### Analysis
+
+Lines 283-293 read `package.json` line-by-line in a `while` loop. For large Node.js projects, `package.json` can be hundreds of lines. The audit suggests reading the entire file into a variable and using bash pattern matching on the whole content.
+
+### Solutions
+
+**Source:** Internal knowledge (bash string operations vs line-by-line I/O)
+**Date:** N/A
+**Reliability:** HIGH
+**Summary:** Reading the entire file into a variable with `$(<file)` is a single read syscall. Then bash `[[ "$content" == *pattern* ]]` is fast in-memory matching — no loop, no line splitting.
+
+**Recommended approach:**
+```bash
+if [[ -f "$project/package.json" ]]; then
+  local content
+  content=$(<"$project/package.json")
+  if [[ "$content" == *'"test"'* ]] && [[ "$content" != *'no test specified'* ]]; then
+    DETECTED_RUNNER="npm test"
+    return 0
+  fi
+fi
+```
+
+This replaces the `while IFS= read -r line` loop with two pattern matches on the full file content. It is both faster and simpler. The pattern `*'"test"'*` matches the same content as the original line-by-line check (looking for a `"test"` key in the scripts section). The false positive risk is acceptable since a `package.json` containing `"test"` almost always has a test script.
+
+---
+
+## INTENT-01 [LOW] — Scoring formula mismatch SKILL.md vs implementation
+
+**Category:** INTENT
+**Severity:** LOW
+**Search Queries Attempted:** (WebSearch unavailable)
+
+### Analysis
+
+Three different scoring formulas exist:
+
+1. **SKILL.md lines 31-47** (v2 multi-dimensional):
+   - `tests_passing * 5`, `coverage_pct * 3`, `tests_failing * -20`, `execution_time_s * -0.1`
+   - Plus `code_quality` and `architecture_quality` dimensions
+
+2. **SKILL.md line 125** (simplified, in the analyze prompt section):
+   - `tests_passing * 10`, `test_count * 2`, `coverage_pct * 5`, `tests_failing * -20`, `execution_time_s * -0.1`
+
+3. **Implementation at line 936:**
+   - `cur_passing * 100`, `cur_total * 20`, `cur_coverage * 50`, `cur_failing * -200`, `cur_time_s * -1`
+   - (These are x10 scaled: so effectively `passing*10 + total*2 + coverage*5 - failing*20 - time*0.1`)
+
+The implementation matches formula #2 (line 125), not formula #1 (lines 31-47). The v2 formula with `code_quality` and `architecture_quality` is documented but not implemented in the score calculation.
+
+### Solutions
+
+**Source:** Internal knowledge (documentation consistency)
+**Date:** N/A
+**Reliability:** HIGH
+**Summary:** The SKILL.md has two competing formulas. The implementation matches the simplified one. Either update SKILL.md to document the actual formula, or implement the v2 formula.
+
+**Recommended approach:**
+Update SKILL.md lines 31-47 to match the actual implementation, or add a note explaining the v2 formula is aspirational/future and the current implementation uses the simplified formula from line 125. The simplest fix is to update the multipliers in the v2 section to match reality:
+```
+test_health:
+  + (tests_passing x 10)
+  + (test_count x 2)
+  + (coverage_pct x 5)
+  - (tests_failing x 20)
+  - (execution_time_s x 0.1)
+```
+And note that `code_quality` and `architecture_quality` are not yet wired into the main loop's score calculation (they may be used by the analyze agent separately).
+
+---
+
+## Summary
+
+| # | Issue | Category | Severity | External Sources | Action |
+|---|-------|----------|----------|-----------------|--------|
+| 1 | SEC-01 | SECURITY | MEDIUM | 0 | Scope Bash permissions to allowlist based on detected runner |
+| 2 | SEC-02 | SECURITY | LOW | 0 | No changes needed; optionally add `--` before URL |
+| 3 | PERF-01 | PERFORMANCE | HIGH | 0 | Batch cleanup jq calls into single invocation |
+| 4 | BUG-02 | BUG | MEDIUM | 0 | Track sign separately before abs() on score components |
+| 5 | BUG-01 | BUG | MEDIUM | 0 | Sort found worktrees by mtime via stat |
+| 6 | QUALITY-01 | QUALITY | MEDIUM | 0 | Capture Claude exit code, skip loop on failure |
+| 7 | QUALITY-02 | QUALITY | MEDIUM | 0 | Broaden case patterns to match keyword anywhere in line |
+| 8 | ARCH-01 | ARCHITECTURE | MEDIUM | 0 | Same as PERF-01 — batch cleanup jq |
+| 9 | PERF-02 | PERFORMANCE | MEDIUM | 0 | Read entire package.json into variable, pattern match |
+| 10 | INTENT-01 | INTENT | LOW | 0 | Synchronize SKILL.md formulas with implementation |
+
+**Note:** WebSearch was unavailable (permissions not granted). All recommendations are based on internal knowledge of bash scripting best practices, jq usage patterns, POSIX standards, and security principles. These are well-established practices that do not require external validation.
