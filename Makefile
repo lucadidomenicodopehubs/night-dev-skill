@@ -73,16 +73,14 @@ test-help:
 	@echo "--- CLI validation ---"
 	@# --help must exit 0 and show usage
 	@bash $(SCRIPT) --help > /dev/null 2>&1 && echo "PASS: --help exits 0"
-	@# --help must mention all flags
+	@# --help must mention all flags and correctly omit --focus
 	@HELP=$$(bash $(SCRIPT) --help 2>&1); \
 	for flag in "--max-loops" "--hours" "--skip-research" "--push" "--verbose" "--follow" "--inline"; do \
 		if ! echo "$$HELP" | grep -q -- "$$flag"; then \
 			echo "FAIL: --help missing $$flag"; exit 1; \
 		fi; \
 		echo "PASS: --help documents $$flag"; \
-	done
-	@# Verify --focus is NOT in help (Night Dev doesn't have it)
-	@HELP=$$(bash $(SCRIPT) --help 2>&1); \
+	done; \
 	if echo "$$HELP" | grep -q -- "--focus"; then \
 		echo "FAIL: --help should not contain --focus (Night Dev always does everything)"; exit 1; \
 	fi; \

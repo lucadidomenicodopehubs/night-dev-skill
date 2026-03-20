@@ -32,8 +32,9 @@ The evolutionary gate uses a composite score across three dimensions:
 score = test_health + code_quality + architecture_quality
 
 test_health:
-  + (tests_passing × 5)
-  + (coverage_pct × 3)
+  + (tests_passing × 10)
+  + (test_count × 2)
+  + (coverage_pct × 5)
   - (tests_failing × 20)
   - (execution_time_s × 0.1)
 

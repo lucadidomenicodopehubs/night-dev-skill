@@ -93,7 +93,7 @@ resolve_project_path() {
         else
             echo -e "${CYAN}Cloning ${input} to ${clone_dir}...${NC}"
             mkdir -p "$HOME/night-dev-repos"
-            git clone "$input" "$clone_dir"
+            git clone -- "$input" "$clone_dir"
         fi
 
         # Checkout specific branch if requested
@@ -279,14 +279,11 @@ detect_test_runner() {
         return 0
     fi
 
-    # Node: package.json with scripts.test (not the default placeholder) — pure bash
+    # Node: package.json with scripts.test (not the default placeholder) — pure bash, single read
     if [[ -f "$project/package.json" ]]; then
-        local has_test=0 has_placeholder=0 line
-        while IFS= read -r line; do
-            [[ "$line" == *'"test"'* && "$line" == *:* ]] && has_test=1
-            [[ "$line" == *'no test specified'* ]] && has_placeholder=1
-        done < "$project/package.json"
-        if [[ "$has_test" -eq 1 ]] && [[ "$has_placeholder" -eq 0 ]]; then
+        local content
+        content=$(<"$project/package.json")
+        if [[ "$content" == *'"test"'* ]] && [[ "$content" != *'no test specified'* ]]; then
             DETECTED_RUNNER="npm test"
             return 0
         fi
@@ -461,8 +458,17 @@ follow_night_dev() {
         exit 1
     fi
 
-    # Pick the most recent one
-    local status_file="${worktrees[0]}"
+    # Pick the most recent one by modification time
+    local status_file="" newest_mtime=0
+    local wt
+    for wt in "${worktrees[@]}"; do
+        local mtime
+        mtime=$(stat -c '%Y' "$wt" 2>/dev/null || echo 0)
+        if [[ $mtime -gt $newest_mtime ]]; then
+            newest_mtime=$mtime
+            status_file="$wt"
+        fi
+    done
     local nd_dir
     nd_dir="${status_file%/*}"
     local wt_path
@@ -709,11 +715,17 @@ main() {
     # Without this, claude -p sessions can't write files or run commands
     local wt_claude_dir="${WORKTREE_PATH}/.claude"
     mkdir -p "$wt_claude_dir"
-    cat > "$wt_claude_dir/settings.json" <<'EOSETTINGS'
+    cat > "$wt_claude_dir/settings.json" <<EOSETTINGS
 {
   "permissions": {
     "allow": [
-      "Bash(*)",
+      "Bash(${DETECTED_RUNNER})",
+      "Bash(${DETECTED_RUNNER} *)",
+      "Bash(git *)",
+      "Bash(cd *)",
+      "Bash(ls *)",
+      "Bash(wc *)",
+      "Bash(cat *)",
       "Read(*)",
       "Write(*)",
       "Edit(*)",
@@ -754,10 +766,13 @@ EOSETTINGS
         echo "Backup: $BACKUP_DIR"
       fi
       if [[ "$HAS_JQ" == "true" ]] && [[ -f "$ND_DIR/status.json" ]]; then
-        # Deferred circuit-breaker status update
+        # Batched cleanup: single jq call for circuit breaker + phase completion
+        local jq_cleanup='.phase = "COMPLETED"'
         if [[ "${_CIRCUIT_BREAKER_TRIGGERED:-false}" == "true" ]]; then
-          update_status "circuit_breaker" "OPEN"
+          jq_cleanup='.circuit_breaker = "OPEN" | .phase = "COMPLETED"'
         fi
+        local tmp="${ND_DIR}/status.tmp.json"
+        jq "$jq_cleanup" "$ND_DIR/status.json" > "$tmp" && mv "$tmp" "$ND_DIR/status.json"
         local final_score
         final_score=$(jq -r '.current_tests.score // "N/A"' "$ND_DIR/status.json" 2>/dev/null)
         echo "Final score: $final_score"
@@ -770,7 +785,6 @@ EOSETTINGS
         echo "To merge:   git checkout main && git merge $BRANCH_NAME"
         echo "To discard: git worktree remove $WORKTREE_PATH && git branch -D $BRANCH_NAME"
       fi
-      update_status "phase" "COMPLETED"
     }
     trap cleanup EXIT
 
@@ -910,13 +924,21 @@ ${PREV_CHANGELOG}"
       else
         echo "Invoking Claude for loop $CURRENT_LOOP..."
         local claude_cmd=(claude -p "$LOOP_PROMPT" --max-turns "$MAX_CLAUDE_TURNS" --permission-mode auto)
+        local claude_exit=0
         if [[ "$VERBOSE" == "true" ]]; then
           # Stream output to terminal AND log file simultaneously
           (cd "$WORKTREE_PATH" && "${claude_cmd[@]}" 2>"$LOOP_DIR/claude_stderr.log") \
-            | tee "$LOOP_DIR/claude_output.log" ; true
+            | tee "$LOOP_DIR/claude_output.log" || claude_exit=$?
         else
           (cd "$WORKTREE_PATH" && "${claude_cmd[@]}") \
-            > "$LOOP_DIR/claude_output.log" 2>"$LOOP_DIR/claude_stderr.log" || true
+            > "$LOOP_DIR/claude_output.log" 2>"$LOOP_DIR/claude_stderr.log" || claude_exit=$?
+        fi
+
+        if [[ $claude_exit -ne 0 ]] || [[ ! -s "$LOOP_DIR/claude_output.log" ]]; then
+          echo -e "${YELLOW}WARNING: Claude invocation failed (exit=$claude_exit). Skipping score calculation.${NC}" >&2
+          CONSECUTIVE_ZERO=$((CONSECUTIVE_ZERO + 1))
+          APPLIED=0; SKIPPED=0; REVERTED=0; ESCALATED=0
+          continue
         fi
       fi
 
@@ -934,10 +956,14 @@ ${PREV_CHANGELOG}"
 
       # Inline score arithmetic (avoids subshell fork to calculate_score)
       local score_x10=$(( (cur_passing * 100) + (cur_total * 20) + (cur_coverage * 50) - (cur_failing * 200) - cur_time_s ))
-      local current_score=$(( score_x10 / 10 ))
-      local score_remainder=$(( score_x10 % 10 ))
-      [[ $score_remainder -lt 0 ]] && score_remainder=$(( -score_remainder ))
-      current_score="${current_score}.${score_remainder}"
+      local sign="" abs_score_x10=$score_x10
+      if [[ $score_x10 -lt 0 ]]; then
+        sign="-"
+        abs_score_x10=$(( -score_x10 ))
+      fi
+      local current_score=$(( abs_score_x10 / 10 ))
+      local score_remainder=$(( abs_score_x10 % 10 ))
+      current_score="${sign}${current_score}.${score_remainder}"
 
       echo -e "Score: ${YELLOW}${current_score}${NC} (passing=${cur_passing}, failing=${cur_failing}, total=${cur_total}, coverage=${cur_coverage}%)"
 
@@ -966,10 +992,10 @@ ${PREV_CHANGELOG}"
         local _cl_line
         while IFS= read -r _cl_line; do
           case "$_cl_line" in
-            *[-\*]\ APPLICATA\ :*|*[-\*]\ APPLICATA:*)   APPLIED=$((APPLIED + 1)) ;;
-            *[-\*]\ SKIPPATA\ :*|*[-\*]\ SKIPPATA:*)     SKIPPED=$((SKIPPED + 1)) ;;
-            *[-\*]\ REVERTITA\ :*|*[-\*]\ REVERTITA:*)   REVERTED=$((REVERTED + 1)) ;;
-            *[-\*]\ ESCALATED\ :*|*[-\*]\ ESCALATED:*|*[-\*]\ URGENTE\ :*|*[-\*]\ URGENTE:*) ESCALATED=$((ESCALATED + 1)) ;;
+            *APPLICATA*)   APPLIED=$((APPLIED + 1)) ;;
+            *SKIPPATA*)    SKIPPED=$((SKIPPED + 1)) ;;
+            *REVERTITA*)   REVERTED=$((REVERTED + 1)) ;;
+            *ESCALATED*|*URGENTE*) ESCALATED=$((ESCALATED + 1)) ;;
           esac
         done < "$LOOP_DIR/changelog.md"
 
