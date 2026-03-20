@@ -35,4 +35,9 @@ git commit --allow-empty -m "init" -q
 PROJECT_PATH="$TEST_TMPDIR"
 assert_exit 0 check_dirty_state
 
+# --- Test 4: check_claude_cli fails when claude not in PATH ---
+test_start "check_claude_cli: missing claude exits 1"
+_test_no_claude() { PATH=/nonexistent check_claude_cli; }
+assert_exit 1 _test_no_claude
+
 test_summary

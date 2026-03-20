@@ -88,4 +88,22 @@ parse_test_results "$TEST_TMPDIR/garbage_output.txt"
 assert_eq "0" "$_PARSE_PASSED" "garbage returns 0 passed"
 assert_eq "0" "$_PARSE_FAILED" "garbage returns 0 failed"
 
+# --- Test 9: coverage percentage is extracted ---
+test_start "parse_test_results: coverage extraction"
+cat > "$TEST_TMPDIR/cov_extract.txt" <<'EOF'
+23 passed in 1.23s
+Coverage report: 85% total
+EOF
+parse_test_results "$TEST_TMPDIR/cov_extract.txt"
+assert_eq "85" "$_PARSE_COV" "coverage percentage extracted"
+
+# --- Test 10: zero percent coverage ---
+test_start "parse_test_results: zero coverage stays 0"
+cat > "$TEST_TMPDIR/cov_zero.txt" <<'EOF'
+10 passed in 0.50s
+Coverage: 0%
+EOF
+parse_test_results "$TEST_TMPDIR/cov_zero.txt"
+assert_eq "0" "$_PARSE_COV" "zero coverage stays 0"
+
 test_summary

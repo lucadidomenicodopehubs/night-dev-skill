@@ -1,6 +1,8 @@
 .PHONY: test test-syntax test-structure test-help test-version test-parse-results \
        test-detect-runner test-validate-numeric test-arg-parsing test-score-calc \
-       test-url-matching test-shellcheck test-dry-run test-git-checks
+       test-url-matching test-shellcheck test-dry-run test-git-checks \
+       test-banner test-follow test-helpers test-formula-consistency \
+       test-bash-version test-codeintel-path
 
 SHELL := /bin/bash
 SCRIPT := scripts/night-dev.sh
@@ -13,7 +15,9 @@ REQUIRED_REFS := analyze-prompt.md planner-prompt.md implementation-prompt.md \
 
 test: test-syntax test-structure test-help test-version test-dry-run \
       test-parse-results test-detect-runner test-validate-numeric \
-      test-arg-parsing test-score-calc test-url-matching test-git-checks test-shellcheck
+      test-arg-parsing test-score-calc test-url-matching test-git-checks \
+      test-banner test-follow test-helpers test-formula-consistency \
+      test-bash-version test-codeintel-path test-shellcheck
 	@echo ""
 	@echo "═══ All tests passed ═══"
 
@@ -181,3 +185,49 @@ test-shellcheck:
 test-git-checks:
 	@echo "--- git checks validation ---"
 	@bash tests/test_git_checks.sh
+
+test-banner:
+	@echo "--- banner validation ---"
+	@bash tests/test_banner.sh
+
+test-follow:
+	@echo "--- follow mode validation ---"
+	@bash tests/test_follow.sh
+
+test-helpers:
+	@echo "--- test helpers validation ---"
+	@bash -c 'source tests/test_helpers.sh; \
+		test_start "assert_not_contains: needle absent passes"; \
+		assert_not_contains "hello world" "xyz" "absent substring"; \
+		test_start "assert_not_contains: needle present fails"; \
+		_TEST_FAIL=0; \
+		assert_not_contains "hello world" "world" "present substring" >/dev/null 2>&1; \
+		if [[ $$_TEST_FAIL -eq 1 ]]; then \
+			echo "PASS: assert_not_contains correctly fails on present substring"; \
+			_TEST_FAIL=0; _TEST_PASS=$$((_TEST_PASS + 1)); \
+		else \
+			echo "FAIL: assert_not_contains should have failed"; exit 1; \
+		fi; \
+		test_summary'
+
+test-formula-consistency:
+	@echo "--- formula consistency validation ---"
+	@# Verify score formula constants are consistent across SKILL.md and night-dev.sh
+	@if grep -q 'tests_passing.*10\|passing \* 10\|passing × 10' $(SKILL) && \
+	    grep -q 'passing \* 100' $(SCRIPT) && \
+	    grep -q 'failing.*20\|failing \* 20\|failing × 20' $(SKILL) && \
+	    grep -q 'failing \* 200' $(SCRIPT); then \
+		echo "PASS: score formula constants consistent between SKILL.md and night-dev.sh"; \
+	else \
+		echo "FAIL: score formula constants inconsistent"; exit 1; \
+	fi
+
+test-bash-version:
+	@echo "--- bash version check validation ---"
+	@grep -q 'BASH_VERSINFO' $(SCRIPT) && echo "PASS: bash version check exists in script" || \
+		{ echo "FAIL: bash version check missing"; exit 1; }
+
+test-codeintel-path:
+	@echo "--- codeintel path validation ---"
+	@grep -q 'CODEINTEL_CLI' $(SCRIPT) && echo "PASS: CODEINTEL_CLI env var override exists" || \
+		{ echo "FAIL: CODEINTEL_CLI override missing"; exit 1; }

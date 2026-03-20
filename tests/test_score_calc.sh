@@ -34,4 +34,9 @@ test_start "score_calc: all dimensions"
 calculate_score 15 2 17 75 45
 assert_eq "514.5" "$_CALC_SCORE" "15p/2f/17t/75cov/45s = 514.5"
 
+# --- Test 6: all zeros ---
+test_start "score_calc: all zeros"
+calculate_score 0 0 0 0 0
+assert_eq "0.0" "$_CALC_SCORE" "all zeros = 0.0"
+
 test_summary

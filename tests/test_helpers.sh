@@ -86,6 +86,18 @@ assert_contains() {
     fi
 }
 
+# Assert substring NOT contained
+assert_not_contains() {
+    local haystack="$1" needle="$2" msg="${3:-}"
+    if [[ "$haystack" != *"$needle"* ]]; then
+        _TEST_PASS=$((_TEST_PASS + 1))
+        echo -e "${_T_GREEN}PASS${_T_NC}: ${_TEST_NAME}${msg:+ — $msg}"
+    else
+        _TEST_FAIL=$((_TEST_FAIL + 1))
+        echo -e "${_T_RED}FAIL${_T_NC}: ${_TEST_NAME}${msg:+ — $msg} (expected NOT to contain '$needle')"
+    fi
+}
+
 # Print summary (pytest-compatible format)
 test_summary() {
     echo ""

@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Require bash 4.2+ for EPOCHSECONDS, printf -v with time format, etc.
+if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 2) )); then
+    echo "Error: night-dev.sh requires bash 4.2+ (found $BASH_VERSION)" >&2
+    exit 1
+fi
+
 VERSION="1.0.0"
 
 # --- Constants ---
@@ -737,9 +743,10 @@ EOSTATUS
     # Known issue: KuzuDB may segfault during cleanup (exit code 139) but data is saved correctly.
     # Use || true to prevent set -e from aborting on any exit code.
     CODEINTEL_AVAILABLE="false"
-    if command -v npx &> /dev/null && [ -f "/root/firmamento-codeintel/src/cli/index.ts" ]; then
+    local CODEINTEL_CLI="${CODEINTEL_CLI:-/root/firmamento-codeintel/src/cli/index.ts}"
+    if command -v npx &> /dev/null && [ -f "$CODEINTEL_CLI" ]; then
       echo -e "${CYAN}[CodeIntel] Indexing project...${NC}"
-      if npx tsx /root/firmamento-codeintel/src/cli/index.ts analyze "$WORKTREE_PATH" --registry "$ND_DIR/codeintel-registry.json" 2>/dev/null; then
+      if npx tsx "$CODEINTEL_CLI" analyze "$WORKTREE_PATH" --registry "$ND_DIR/codeintel-registry.json" 2>/dev/null; then
         CODEINTEL_AVAILABLE="true"
       fi
       echo -e "${GREEN}[CodeIntel] Indexing step complete (available: ${CODEINTEL_AVAILABLE}).${NC}"
