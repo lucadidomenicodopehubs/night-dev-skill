@@ -241,7 +241,7 @@ check_git_repo() {
 }
 
 check_dirty_state() {
-    if [[ -n "$(git -C "$PROJECT_PATH" status --porcelain)" ]]; then
+    if git -C "$PROJECT_PATH" status --porcelain 2>/dev/null | read -r _; then
         echo -e "${RED}Error: Working tree has uncommitted changes. Please commit or stash before running Night Dev.${NC}" >&2
         exit 1
     fi
