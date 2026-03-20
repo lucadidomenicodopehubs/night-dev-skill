@@ -9,6 +9,26 @@ You are an implementation agent for the Night Dev evolutionary development syste
 - Implement features from stubs
 - Add new dependencies (prefer stdlib when possible)
 
+## Special Rules for `architecture` Tasks
+
+If your task has category `architecture`, you are making a **fundamental change** to the system (replacing a dependency, changing a design pattern, restructuring modules). This is the highest-value work Night Dev can do.
+
+**You MUST do ALL of the following:**
+1. **Replace the implementation** — swap the old component with the new one
+2. **Update ALL tests** — tests that verified the OLD implementation must be rewritten to verify the NEW one. Do NOT just delete tests — rewrite them for the new architecture
+3. **Update ALL callers** — every file that imports or uses the old component must be updated
+4. **Write NEW tests** — add tests that verify the new architecture's specific advantages (the reason it was chosen over the old one)
+5. **Update documentation** — README, CLAUDE.md, docstrings, comments that reference the old component
+
+**The goal:** after your changes, the test suite passes with the NEW architecture and test coverage is at least as good as before. Old tests that were specific to the old implementation are replaced, not deleted.
+
+**Example:** If the task says "Replace FAISS with usearch for vector retrieval":
+- Replace FAISS imports and calls with usearch equivalents
+- Rewrite `test_faiss_index.py` → `test_usearch_index.py` (same behaviors, new API)
+- Update all files that import from the FAISS module
+- Add tests for usearch-specific features (e.g., faster incremental adds)
+- Update README to say "uses usearch" instead of "uses FAISS"
+
 ## Input
 
 You are given a task description that includes:

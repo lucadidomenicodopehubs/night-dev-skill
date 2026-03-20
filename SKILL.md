@@ -267,7 +267,7 @@ Create the implementation plan with ALL findings (no task limit), ordered by **r
 
 Each task entry must contain:
 - **ID** — sequential (TASK-1, TASK-2, TASK-3...)
-- **Category** — security | bug | performance | quality | feature | refactor | test | dependency
+- **Category** — security | bug | performance | quality | feature | refactor | test | dependency | architecture
 - **Description** — what to do, concisely
 - **Files** — list of files to modify (or "NEW: path/to/file" for new files)
 - **Risk** — low | medium | high
@@ -283,9 +283,34 @@ Each task entry must contain:
 
 Read `{LOOP_DIR}/plan.md`. Record the current score from `{LOOP_DIR}/baseline.json` as `old_score`.
 
+#### Architectural changes: special rules
+
+Tasks with category `architecture` follow different rules than normal tasks:
+
+**The problem:** Replacing a core dependency (e.g., encoder, database, framework) will break existing tests that are written for the old implementation. The score drops, and the evolutionary gate rejects the change — even if the new architecture is objectively better.
+
+**The solution:** For `architecture` tasks, the implementation agent MUST:
+1. **Replace the implementation** (e.g., swap Jina encoder with E5-mistral)
+2. **Update ALL affected tests** to work with the new implementation
+3. **Update ALL callers** that depend on the old interface
+4. **Add new tests** that verify the new architecture works correctly
+5. **Update documentation** (README, CLAUDE.md, docstrings) to reflect the change
+
+The goal is: after an architectural change, the test suite should pass with the NEW architecture, and coverage should be at least as good as before. The score should improve because:
+- Same or more tests passing (+5 each)
+- Same or better coverage (+3 per %)
+- Higher architecture_score (+10 per point)
+- Fewer TODO/FIXME if technical debt was reduced (+1 each)
+
+**Architecture tasks MUST be in their own batch** — never mixed with non-architecture tasks. This way, if the architectural change fails, only it gets reverted, not the safe changes.
+
 #### Step 5.1 — Batch implementation
 
-Implement ALL tasks from plan.md in a single pass. Dispatch parallel sub-agents via the Agent tool where file sets don't overlap:
+Separate tasks into two groups:
+- **Normal batch:** all non-architecture tasks (implemented together)
+- **Architecture batch:** each architecture task implemented alone (one at a time, after normal batch)
+
+For the normal batch, implement ALL tasks in a single pass. Dispatch parallel sub-agents via the Agent tool where file sets don't overlap:
 - Instruct each to read the prompt template from `~/.claude/skills/night-dev/references/implementation-prompt.md`
 - Each agent implements its assigned task(s)
 - Agents must NOT run git commands — only edit files and create new files
@@ -438,7 +463,7 @@ After this, your work for this loop is done. The bash wrapper handles the loop/s
 4. **ONLY keep changes that STRICTLY improve the score** (new > old, not >=).
 5. **CAN create new files and modules** — Night Dev is a developer, not just a maintainer.
 6. **CAN add new dependencies** — but prefer stdlib when possible.
-7. **CANNOT change public API contracts** without updating all callers and tests.
+7. **For `architecture` tasks: MUST update tests, callers, and docs** to reflect the new architecture. The test suite must pass with the NEW implementation, not the old one.
 8. **Write all outputs** to the loop directory.
 9. **Never repeat reverted changes** from previous loops.
 10. **Batch-first, fallback-sequential** — always try the full batch before falling back.
