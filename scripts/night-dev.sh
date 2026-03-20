@@ -877,14 +877,15 @@ ${SKILL_CONTENT}
 ${prev_changelog_cached}"
       fi
 
-      # Build prompt: static template + dynamic fields only
-      LOOP_PROMPT="- Loop: ${CURRENT_LOOP} / ${MAX_LOOPS}
+      # Build prompt: static template first (avoids claude -p treating "- Loop:" as a CLI flag)
+      LOOP_PROMPT="${_PROMPT_STATIC}
+
+DYNAMIC CONTEXT:
+- Loop: ${CURRENT_LOOP} / ${MAX_LOOPS}
 - Loop directory: ${LOOP_DIR}
 - Is first loop: ${IS_FIRST_LOOP}
 - Previous score: ${PREVIOUS_SCORE}
-${PREV_CHANGELOG}
-
-${_PROMPT_STATIC}"
+${PREV_CHANGELOG}"
 
       # Invoke Claude
       if [[ "$INLINE_MODE" == "true" ]]; then
