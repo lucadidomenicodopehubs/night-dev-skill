@@ -1002,9 +1002,14 @@ ${SKILL_CONTENT}
       update_score "current_tests" "$cur_passing" "$cur_failing" "$cur_total" "$cur_coverage" "$cur_time_s" "$current_score"
       append_score_history "$CURRENT_LOOP" "$current_score"
 
-      # Check score improvement (compare as strings with awk for float comparison)
-      local improved
-      improved=$(awk -v cur="$current_score" -v prev="$PREVIOUS_SCORE" 'BEGIN { print (cur > prev) ? "yes" : "no" }')
+      # Check score improvement (pure bash: split on '.' and compare as scaled integers)
+      local improved="no"
+      local ci cf pi pf
+      IFS=. read -r ci cf <<< "$current_score"
+      IFS=. read -r pi pf <<< "$PREVIOUS_SCORE"
+      if (( (ci * 10 + ${cf:-0}) > (pi * 10 + ${pf:-0}) )); then
+        improved="yes"
+      fi
       if [[ "$improved" == "yes" ]]; then
         CONSECUTIVE_NO_IMPROVEMENT=0
         echo -e "${GREEN}Score improved: ${PREVIOUS_SCORE} -> ${current_score}${NC}"
