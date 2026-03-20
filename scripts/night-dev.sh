@@ -377,18 +377,18 @@ readonly _PARSE_AWK_SCRIPT='
 
 # Parse test results from a test output file and extract counts
 # Single-pass awk: tries pytest, jest, cargo patterns + coverage + duration in one invocation
+# Sets global variables: _PARSE_PASSED, _PARSE_FAILED, _PARSE_TOTAL, _PARSE_COV, _PARSE_DUR
 parse_test_results() {
     local test_output_file="$1"
+    _PARSE_PASSED=0 _PARSE_FAILED=0 _PARSE_TOTAL=0 _PARSE_COV=0 _PARSE_DUR=0
 
     if [[ ! -f "$test_output_file" ]] || [[ ! -s "$test_output_file" ]]; then
-        echo "0 0 0 0 0"
         return
     fi
 
     local result
     result=$(awk "$_PARSE_AWK_SCRIPT" "$test_output_file")
-
-    echo "${result:-0 0 0 0 0}"
+    read -r _PARSE_PASSED _PARSE_FAILED _PARSE_TOTAL _PARSE_COV _PARSE_DUR <<< "${result:-0 0 0 0 0}"
 }
 
 # --- Banner ---
@@ -446,33 +446,28 @@ follow_night_dev() {
     local has_jq=false
     command -v jq &>/dev/null && has_jq=true
 
-    # Find active Night Dev worktrees
-    local worktrees=()
-    while IFS= read -r -d '' wt; do
-        worktrees+=("$wt")
-    done < <(find "$search_path" "$HOME/night-dev-repos" -maxdepth 4 -name "status.json" -path "*/.night-dev/*" -print0 2>/dev/null)
+    # Find active Night Dev worktrees — single find with -printf for mtime (avoids stat forks)
+    local status_file=""
+    status_file=$(find "$search_path" "$HOME/night-dev-repos" -maxdepth 4 \
+        -name "status.json" -path "*/.night-dev/*" -printf '%T@ %p\n' 2>/dev/null \
+        | sort -rn | head -1 | cut -d' ' -f2-)
 
-    if [[ ${#worktrees[@]} -eq 0 ]]; then
+    if [[ -z "$status_file" ]]; then
         echo -e "${RED}No Night Dev instances found.${NC}"
         exit 1
     fi
-
-    # Pick the most recent one by modification time
-    local status_file="" newest_mtime=0
-    local wt
-    for wt in "${worktrees[@]}"; do
-        local mtime
-        mtime=$(stat -c '%Y' "$wt" 2>/dev/null || echo 0)
-        if [[ $mtime -gt $newest_mtime ]]; then
-            newest_mtime=$mtime
-            status_file="$wt"
-        fi
-    done
     local nd_dir
     nd_dir="${status_file%/*}"
-    local wt_path
+
+    # Single jq call extracts all needed fields (PERF-04: consolidate 3 jq forks into 1)
+    local wt_path="" phase="" loop="" max_loops="" score="" current_loop_num=""
     if [[ "$has_jq" == "true" ]]; then
-        wt_path=$(jq -r '.worktree_path // empty' "$status_file" 2>/dev/null)
+        local all_data
+        all_data=$(jq -r '[.worktree_path // "", .phase // "", .current_loop // 0, .max_loops // 0, (.current_tests.score // "N/A")] | @tsv' "$status_file" 2>/dev/null)
+        if [[ -n "$all_data" ]]; then
+            IFS=$'\t' read -r wt_path phase loop max_loops score <<< "$all_data"
+            current_loop_num="$loop"
+        fi
     fi
     if [[ -z "${wt_path:-}" ]]; then
         wt_path="${nd_dir%/*}"
@@ -482,46 +477,40 @@ follow_night_dev() {
     echo -e "${CYAN}║${NC}  ${BOLD}Night Dev — Live Monitor${NC}                                  ${CYAN}║${NC}"
     echo -e "${CYAN}╠══════════════════════════════════════════════════════════════╣${NC}"
     echo -e "${CYAN}║${NC}  Worktree: ${wt_path}"
-    if [[ "$has_jq" == "true" ]]; then
-        local status_data
-        status_data=$(jq -r '[.phase, .current_loop, .max_loops, (.current_tests.score // "N/A")] | @tsv' "$status_file" 2>/dev/null)
-        if [[ -n "$status_data" ]]; then
-            local phase loop max_loops score
-            IFS=$'\t' read -r phase loop max_loops score <<< "$status_data"
-            echo -e "${CYAN}║${NC}  Phase:    ${BOLD}${phase}${NC}"
-            echo -e "${CYAN}║${NC}  Loop:     ${loop} / ${max_loops}"
-            echo -e "${CYAN}║${NC}  Score:    ${BOLD}${YELLOW}${score}${NC}"
-        fi
+    if [[ -n "$phase" ]]; then
+        echo -e "${CYAN}║${NC}  Phase:    ${BOLD}${phase}${NC}"
+        echo -e "${CYAN}║${NC}  Loop:     ${loop} / ${max_loops}"
+        echo -e "${CYAN}║${NC}  Score:    ${BOLD}${YELLOW}${score}${NC}"
     fi
     echo -e "${CYAN}╚══════════════════════════════════════════════════════════════╝${NC}"
     echo ""
 
     local latest_log=""
-    if [[ "$has_jq" == "true" ]]; then
-        local current_loop_num
-        current_loop_num=$(jq -r '.current_loop' "$status_file" 2>/dev/null)
-        if [[ "$current_loop_num" =~ ^[0-9]+$ ]] && [[ "$current_loop_num" -gt 0 ]]; then
-            local candidate="$nd_dir/loop-${current_loop_num}/claude_output.log"
-            [[ -f "$candidate" ]] && latest_log="$candidate"
-        fi
+    if [[ "$current_loop_num" =~ ^[0-9]+$ ]] && [[ "$current_loop_num" -gt 0 ]]; then
+        local candidate="$nd_dir/loop-${current_loop_num}/claude_output.log"
+        [[ -f "$candidate" ]] && latest_log="$candidate"
     fi
     # Fallback: find latest log via filesystem glob (no hardcoded upper bound)
     if [[ -z "$latest_log" ]]; then
         local candidate
-        candidate=$(ls -1d "$nd_dir"/loop-*/claude_output.log 2>/dev/null \
-          | sort -t- -k2 -n | tail -1) || true
-        [[ -n "$candidate" ]] && latest_log="$candidate"
+        # Bash glob + arithmetic to find max loop number (avoids ls|sort|tail forks)
+        local _max_loop=0 _loop_logs=("$nd_dir"/loop-*/claude_output.log)
+        local _ll
+        for _ll in "${_loop_logs[@]}"; do
+            [[ -f "$_ll" ]] || continue
+            local _num="${_ll##*loop-}"
+            _num="${_num%%/*}"
+            (( _num > _max_loop )) && _max_loop=$_num && latest_log="$_ll"
+        done
     fi
 
     if [[ -z "$latest_log" ]]; then
         echo -e "${YELLOW}No output log yet. Waiting for first loop to start...${NC}"
         while true; do
-            local current_loop_num
-            if [[ "$has_jq" == "true" ]]; then
-                current_loop_num=$(jq -r '.current_loop' "$status_file" 2>/dev/null || echo "1")
-            else
-                current_loop_num="1"
-            fi
+            local current_loop_num="1"
+            local _raw
+            _raw=$(<"$status_file" 2>/dev/null) || _raw=""
+            [[ "$_raw" =~ \"current_loop\"[[:space:]]*:[[:space:]]*([0-9]+) ]] && current_loop_num="${BASH_REMATCH[1]}"
             latest_log="$nd_dir/loop-${current_loop_num}/claude_output.log"
             [[ -f "$latest_log" ]] && break
             latest_log=""
@@ -540,14 +529,13 @@ follow_night_dev() {
     # Monitor for new loop logs
     while kill -0 $tail_pid 2>/dev/null; do
         sleep 5
-        local current_loop_num current_phase new_log=""
-        if [[ "$has_jq" == "true" ]]; then
-            local loop_status_data
-            loop_status_data=$(jq -r '[.current_loop, .phase] | @tsv' "$status_file" 2>/dev/null || echo "")
-            IFS=$'\t' read -r current_loop_num current_phase <<< "$loop_status_data"
-        else
-            current_loop_num=""
-            current_phase=""
+        local current_loop_num="" current_phase="" new_log=""
+        # Bash regex extraction avoids jq fork every 5 seconds
+        local _raw
+        _raw=$(<"$status_file" 2>/dev/null) || _raw=""
+        if [[ -n "$_raw" ]]; then
+            [[ "$_raw" =~ \"current_loop\"[[:space:]]*:[[:space:]]*([0-9]+) ]] && current_loop_num="${BASH_REMATCH[1]}"
+            [[ "$_raw" =~ \"phase\"[[:space:]]*:[[:space:]]*\"([^\"]+)\" ]] && current_phase="${BASH_REMATCH[1]}"
         fi
         if [[ "$current_loop_num" =~ ^[0-9]+$ ]]; then
             local candidate="$nd_dir/loop-${current_loop_num}/claude_output.log"
@@ -603,6 +591,7 @@ main() {
     ND_DIR="${WORKTREE_PATH}/.night-dev"
     SKILL_DIR="${NIGHT_DEV_SKILL_DIR:-$HOME/.claude/skills/night-dev}"
     DEADLINE=$((START_TIME + MAX_HOURS * 3600))
+    _STATUS_TMP=""  # initialized after ND_DIR is created
 
     # --- Pre-run Backup ---
     # Create a full backup of the project before any changes
@@ -633,6 +622,7 @@ main() {
 
     # Create .night-dev directory inside worktree
     mkdir -p "$ND_DIR"
+    _STATUS_TMP="${ND_DIR}/status.tmp.json"
 
     # --- status.json Initialization ---
     # ISO-8601 timestamps via printf (no forks)
@@ -766,10 +756,12 @@ EOSETTINGS
         if [[ "${_CIRCUIT_BREAKER_TRIGGERED:-false}" == "true" ]]; then
           jq_cleanup='.circuit_breaker = "OPEN" | .phase = "COMPLETED"'
         fi
-        local tmp; tmp=$(mktemp "${ND_DIR}/status.tmp.XXXXXX.json")
+        local tmp="$_STATUS_TMP"
         jq "$jq_cleanup" "$ND_DIR/status.json" > "$tmp" && mv "$tmp" "$ND_DIR/status.json" || rm -f "$tmp"
-        local final_score
-        final_score=$(jq -r '.current_tests.score // "N/A"' "$ND_DIR/status.json" 2>/dev/null)
+        # Extract score with bash regex instead of forking another jq
+        local final_score="N/A" _raw
+        _raw=$(<"$ND_DIR/status.json" 2>/dev/null) || _raw=""
+        [[ "$_raw" =~ \"score\"[[:space:]]*:[[:space:]]*\"([^\"]+)\" ]] && final_score="${BASH_REMATCH[1]}"
         echo "Final score: $final_score"
       fi
       echo ""
@@ -856,7 +848,7 @@ ${SKILL_CONTENT}
 
       # Update status (batched single jq call — sets phase directly to RUNNING CLAUDE)
       if [[ "$HAS_JQ" == "true" ]]; then
-        local tmp; tmp=$(mktemp "${ND_DIR}/status.tmp.XXXXXX.json")
+        local tmp="$_STATUS_TMP"
         jq --argjson cl "$CURRENT_LOOP" --arg ph "LOOP $CURRENT_LOOP — RUNNING CLAUDE" \
           '.current_loop = $cl | .phase = $ph' \
           "$ND_DIR/status.json" > "$tmp" && mv "$tmp" "$ND_DIR/status.json" || rm -f "$tmp"
@@ -925,7 +917,7 @@ ${PREV_CHANGELOG}"
           CONSECUTIVE_ZERO=$((CONSECUTIVE_ZERO + 1))
           APPLIED=0; SKIPPED=0; REVERTED=0; ESCALATED=0
           if [[ "$HAS_JQ" == "true" ]]; then
-            local tmp; tmp=$(mktemp "${ND_DIR}/status.tmp.XXXXXX.json")
+            local tmp="$_STATUS_TMP"
             jq --argjson cz "$CONSECUTIVE_ZERO" \
                '.stats.consecutive_zero_applied = $cz' \
                "$ND_DIR/status.json" > "$tmp" && mv "$tmp" "$ND_DIR/status.json" || rm -f "$tmp"
@@ -955,7 +947,7 @@ ${PREV_CHANGELOG}"
           APPLIED=0; SKIPPED=0; REVERTED=0; ESCALATED=0
           # Persist consecutive_zero to status.json so it survives script kill between loops
           if [[ "$HAS_JQ" == "true" ]]; then
-            local tmp; tmp=$(mktemp "${ND_DIR}/status.tmp.XXXXXX.json")
+            local tmp="$_STATUS_TMP"
             jq --argjson cz "$CONSECUTIVE_ZERO" \
                '.stats.consecutive_zero_applied = $cz' \
                "$ND_DIR/status.json" > "$tmp" && mv "$tmp" "$ND_DIR/status.json" || rm -f "$tmp"
@@ -971,10 +963,9 @@ ${PREV_CHANGELOG}"
         test_output="$LOOP_DIR/test_results.log"
       fi
 
-      local test_data
-      test_data=$(parse_test_results "$test_output")
-      local cur_passing cur_failing cur_total cur_coverage cur_time_s
-      read -r cur_passing cur_failing cur_total cur_coverage cur_time_s <<< "$test_data"
+      parse_test_results "$test_output"
+      local cur_passing=$_PARSE_PASSED cur_failing=$_PARSE_FAILED cur_total=$_PARSE_TOTAL
+      local cur_coverage=$_PARSE_COV cur_time_s=$_PARSE_DUR
 
       # Inline score arithmetic — computes test_health only.
       # code_quality and architecture_quality (per SKILL.md) are evaluated by
@@ -1054,7 +1045,7 @@ ${PREV_CHANGELOG}"
 
       # Batched status.json update — single jq call for scores, history, and stats
       if [[ "$HAS_JQ" == "true" ]]; then
-        local tmp; tmp=$(mktemp "${ND_DIR}/status.tmp.XXXXXX.json")
+        local tmp="$_STATUS_TMP"
         local jq_expr='.current_tests = {passing: $p, failing: $f, total: $t, coverage: $c, time_s: $ts, score: $s}
           | .score_history += [{loop: $l, score: $s}]
           | .stats.total_applied += $a
