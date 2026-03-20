@@ -24,26 +24,43 @@ These are injected by the bash wrapper in the prompt:
 - `Previous score` — numeric score from previous loop's baseline (for comparison)
 - `CodeIntel available` — true/false, whether CodeIntel MCP tools are available for blast radius analysis
 
-## Scoring Function
+## Scoring Function (v2 — multi-dimensional)
 
-The evolutionary gate uses this scoring function:
+The evolutionary gate uses a composite score across three dimensions:
 
 ```
-score = (tests_passing * 10)
-      + (test_count * 2)
-      + (coverage_pct * 5)
-      - (tests_failing * 20)
-      - (execution_time_s * 0.1)
+score = test_health + code_quality + architecture_quality
+
+test_health:
+  + (tests_passing × 5)
+  + (coverage_pct × 3)
+  - (tests_failing × 20)
+  - (execution_time_s × 0.1)
+
+code_quality (measured via static analysis if available):
+  - (todo_fixme_hack_count × 1)
+  - (cyclomatic_complexity_avg × 2)     # from radon, if installed
+  - (duplicate_blocks × 1)
+
+architecture_quality (measured by the ANALYZE agent, stored in analysis.md):
+  + (architecture_score × 10)           # 0-10 rating from the analyze agent
 ```
+
+The `architecture_score` is a 0-10 rating produced by the FASE 2 agent after critical analysis of the codebase's design. It evaluates: dependency choices, abstraction quality, separation of concerns, scalability, and alignment with state-of-the-art for the domain. This score is written to `{LOOP_DIR}/baseline.json` alongside test metrics.
+
+**Scoring fallback:** If static analysis tools (radon, pylint) are not installed, `code_quality` defaults to 0 (neutral). If the analyze agent doesn't produce an `architecture_score`, it defaults to the previous loop's value (no change).
 
 A change is ACCEPTED only if `new_score > old_score`. Equal is NOT enough — must be strictly better.
 
-This means:
-- Adding a passing test: +12 points (10 for passing + 2 for count)
-- Fixing a failing test: +30 points (remove -20 penalty, gain +10 for passing)
-- Increasing coverage by 1%: +5 points
-- Breaking a test: -30 points (lose +10 for passing, gain -20 for failing)
-- Slowing the suite by 10s: -1 point
+**Score economics:**
+- Adding a passing test: +5 points
+- Fixing a failing test: +25 points (remove -20, gain +5)
+- Increasing coverage by 1%: +3 points
+- Breaking a test: -25 points
+- Reducing cyclomatic complexity by 1: +2 points
+- Removing a TODO/FIXME: +1 point
+- Improving architecture score by 1: +10 points (most valuable)
+- **Key insight:** architectural improvements are worth MORE than test farming
 
 ## Phase Execution
 
@@ -126,9 +143,9 @@ Also copy to `{ND_DIR}/baseline.json` for cross-loop reference.
 
 ---
 
-### FASE 2 — ANALYZE + CODE REVIEW
+### FASE 2 — CRITICAL ANALYSIS (code + architecture + design)
 
-This is BROADER than Night Shift's audit. Not just "what's wrong" but also "what can be BUILT".
+**Night Dev is a senior architect, not a test farmer.** This phase must be deeply critical of the software's design choices, not just its bugs.
 
 Dispatch a sub-agent via the Agent tool:
 - Instruct it to read the prompt template from `~/.claude/skills/night-dev/references/analyze-prompt.md`
@@ -136,53 +153,95 @@ Dispatch a sub-agent via the Agent tool:
 - Provide `{LOOP_DIR}/project_understanding.md` (from FASE 0, or from loop 1's directory if loop 2+)
 - Provide `{LOOP_DIR}/baseline.json`
 
-The agent analyzes:
+The agent performs THREE levels of analysis:
 
-**Problems (like Night Shift):**
+#### Level 1: Code Problems (like Night Shift)
 1. Security vulnerabilities
 2. Bugs and logic errors
 3. Performance bottlenecks
 4. Code quality issues
 
-**Development Opportunities (NEW in Night Dev):**
-5. **Missing features** — functionality that the architecture supports but isn't implemented
+#### Level 2: Development Opportunities
+5. **Missing features** — functionality the architecture supports but isn't implemented
 6. **Incomplete implementations** — stubs, TODOs, partial features
-7. **Test gaps** — areas with no test coverage that should have tests
-8. **Refactoring opportunities** — code that works but could be cleaner, more maintainable, more performant
-9. **New modules** — entirely new capabilities that would make the software more complete
-10. **Dependency upgrades** — newer versions of libs with useful features
+7. **Test gaps** — areas with no test coverage
+8. **Refactoring opportunities** — code that could be cleaner/faster
+9. **New modules** — capabilities that would complete the software
+10. **Dependency upgrades** — newer versions with useful features
+
+#### Level 3: Architectural Critique (NEW — highest value)
+The agent must answer these questions critically:
+
+11. **Dependency fitness:** "Is each major dependency the BEST choice for this project? What alternatives exist? Are there lighter, faster, more maintained options?" Examples: Is the ORM the right one? Is the web framework optimal? Is the ML framework the best fit?
+
+12. **Design pattern critique:** "Are the design patterns used here appropriate? Are there anti-patterns? Could a different architecture (event-driven, actor model, pipeline, etc.) be more effective?"
+
+13. **Abstraction quality:** "Are abstractions at the right level? Too many layers? Too few? Leaky abstractions? God objects? Anemic models?"
+
+14. **Scalability assessment:** "Where will this system break under 10x load? 100x? What are the structural bottlenecks that no amount of optimization can fix?"
+
+15. **State-of-the-art gap:** "How does this implementation compare to the current state-of-the-art in its domain? What techniques from recent research could dramatically improve it?" (This drives the FASE 3 research)
+
+16. **Technical coherence:** "Do the technical choices form a coherent whole, or is this a Frankenstein of incompatible decisions?"
+
+The agent MUST produce an `architecture_score` (0-10) based on the Level 3 analysis:
+- 0-3: Fundamental design problems, needs rethinking
+- 4-6: Workable but with clear improvement paths
+- 7-8: Solid architecture with minor optimization opportunities
+- 9-10: State-of-the-art, hard to improve
 
 Each finding includes:
-- Category: `security` | `bug` | `performance` | `quality` | `feature` | `refactor` | `test` | `dependency`
-- Impact: estimated score delta (how much this would improve the score)
+- Category: `security` | `bug` | `performance` | `quality` | `feature` | `refactor` | `test` | `dependency` | `architecture`
+- Impact: estimated score delta
 - Risk: `low` | `medium` | `high`
 - Files involved
 - Description and suggested approach
 
-**Output:** `{LOOP_DIR}/analysis.md`
+**Output:** `{LOOP_DIR}/analysis.md` (must include `architecture_score: N` on a dedicated line)
 
 ---
 
-### FASE 3 — RESEARCH (always, unless --skip-research)
+### FASE 3 — DEEP RESEARCH (academic + engineering)
 
 **Condition:** Execute only when `Skip research` is `false`.
 
-More aggressive than Night Shift's research. Dispatch a sub-agent via the Agent tool:
+**This is Night Dev's most critical differentiation.** The research agent acts as a domain expert who reads papers, studies reference implementations, and brings state-of-the-art knowledge to the project.
+
+Dispatch a sub-agent via the Agent tool:
 - Instruct it to read the prompt template from `~/.claude/skills/night-dev/references/research-prompt.md`
 - Provide the contents of `{LOOP_DIR}/analysis.md`
+- The agent MUST use WebSearch extensively
 
-The agent researches:
+The agent performs THREE types of research:
 
-1. For each development opportunity:
-   - Academic papers with relevant algorithms/approaches
-   - GitHub repositories with reference implementations
-   - Best practices and design patterns
-   - Library documentation for new dependencies
+#### Type 1: Academic Research (for architecture and domain improvements)
+For each Level 3 finding (architectural critique) and domain-specific opportunity:
+- **Search arXiv, Google Scholar, Semantic Scholar** for recent papers (2023-2026)
+- **Read abstracts and key findings** — extract actionable techniques
+- **Search queries like:**
+  - `"{domain} state of the art 2025"` (e.g., "sentence embedding state of the art 2025")
+  - `"{technique} vs {current_approach} benchmark"` (e.g., "InfoNCE vs MSE distillation benchmark")
+  - `"{problem} novel approach paper"` (e.g., "cross-lingual retrieval novel approach")
+  - `"better alternative to {dependency}"` (e.g., "better alternative to FAISS for small-scale retrieval")
 
-2. For each bug/security issue:
-   - CVE advisories and fixes
-   - OWASP guidelines
-   - Framework-specific solutions
+#### Type 2: Engineering Research (for implementation quality)
+For each development opportunity and refactoring finding:
+- **Search GitHub** for reference implementations:
+  - `"{technique} implementation python"` or `"{technique} implementation {language}"`
+  - Look at repos with >100 stars for quality signal
+  - Read their architecture, not just their README
+- **Search for best practices:**
+  - `"{framework} production best practices 2025"`
+  - `"{pattern} anti-pattern {language}"`
+
+#### Type 3: Bug/Security Research (same as Night Shift)
+- CVE advisories, OWASP guidelines, framework-specific fixes
+
+**For each finding, the research agent must provide:**
+- Source URL (real, from actual search results)
+- Key insight (1-3 sentences: what did this paper/repo discover?)
+- Actionability (how does this apply to OUR project specifically?)
+- Implementation complexity (trivial / moderate / significant)
 
 **Output:** `{LOOP_DIR}/research.md`
 

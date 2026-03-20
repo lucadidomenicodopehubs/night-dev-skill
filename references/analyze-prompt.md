@@ -198,6 +198,56 @@ If `{PREVIOUS_CHANGELOG}` is provided, extract all `REVERTITA` entries. Do NOT s
 - Replacing deprecated packages
 - Adding well-established libraries for common tasks currently done manually
 
+#### Level 3: Architectural Critique (highest value — drives architecture_score)
+
+You MUST think like a senior architect reviewing this project for the first time. Be critical, be honest, be specific.
+
+**11. Dependency fitness:**
+For each major dependency (frameworks, libraries, databases):
+- Is this the BEST choice available today?
+- What are the alternatives? Are they lighter, faster, better maintained?
+- Is this dependency still actively maintained? When was the last release?
+- Example: "Using X for Y, but Z has better performance and is more maintained"
+
+**12. Design pattern critique:**
+- Are the patterns used here appropriate for the problem?
+- Are there anti-patterns? (God objects, circular dependencies, service locator, etc.)
+- Could a fundamentally different architecture work better?
+- Example: "Synchronous pipeline where an event-driven architecture would decouple concerns"
+
+**13. Abstraction quality:**
+- Are abstractions at the right level?
+- Too many layers of indirection? Too few?
+- Leaky abstractions that expose internals?
+- Example: "The data layer leaks SQL into the business logic"
+
+**14. Scalability assessment:**
+- Where will this break at 10x scale? 100x?
+- Are there structural bottlenecks?
+- Example: "In-memory storage limits this to single-process; needs persistent backend"
+
+**15. State-of-the-art gap:**
+- How does this compare to current state-of-the-art in its domain?
+- What techniques from recent research (2023-2026) could improve it?
+- This is the most important question — it drives FASE 3 research
+- Example: "Using TF-IDF for retrieval when dense retrieval (ColBERT, E5) is 30% more accurate"
+
+**16. Technical coherence:**
+- Do choices form a coherent stack?
+- Are there conflicting paradigms? (e.g., async + sync mixed, multiple ORMs)
+
+#### architecture_score
+
+You MUST output this line exactly:
+```
+architecture_score: N
+```
+Where N is 0-10 based on your Level 3 analysis:
+- 0-3: Fundamental design problems
+- 4-6: Workable but clear improvements possible
+- 7-8: Solid with minor opportunities
+- 9-10: Near state-of-the-art
+
 ### Score Impact Estimation
 
 For each finding, estimate how it would affect the score:

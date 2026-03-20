@@ -38,6 +38,36 @@ Research ALL findings, prioritized by estimated score delta (highest first). Gro
 
 For each finding, use WebSearch to find relevant solutions. Construct search queries specific to the technology stack and category.
 
+### Academic Research Strategy (for architecture and domain findings)
+
+For each Level 3 finding (architectural critique, state-of-the-art gap), you MUST:
+
+1. **Search arXiv and Google Scholar:**
+   - `site:arxiv.org "{domain keyword} {year}"` (e.g., `site:arxiv.org "contrastive learning sentence embeddings 2025"`)
+   - `site:scholar.google.com "{technique} benchmark comparison"`
+   - `"{problem domain} survey paper 2024 OR 2025"`
+
+2. **Read and extract from papers:**
+   - Title, authors, year
+   - Key finding (1-2 sentences)
+   - Technique proposed
+   - Benchmark results (numbers, not vague claims)
+   - How it applies to THIS project specifically
+
+3. **Search for reference implementations:**
+   - `github.com {paper_name} implementation`
+   - `github.com {technique} python` with >100 stars
+   - Read their code structure, not just README
+
+4. **Compare current vs state-of-the-art:**
+   - "This project uses {current_approach}. Paper X shows {new_approach} achieves {X}% better on {benchmark}"
+   - Be specific with numbers when available
+
+5. **Dependency alternatives research:**
+   - `"{current_dep} vs {alternative} benchmark 2025"`
+   - `"best {category} library python 2025"` (e.g., "best vector search library python 2025")
+   - Compare: performance, API quality, maintenance activity, community size
+
 #### Search Strategies by Category
 
 **SECURITY issues:**
@@ -150,6 +180,12 @@ Write the research report to `{LOOP_DIR}/research.md` with exactly this format:
 - **Repository:** {GitHub URL}
 - **Relevant file:** {path within repo}
 - **How it applies:** {how to adapt this pattern to our codebase}
+
+### Academic Research (for Level 3 / architectural findings)
+- **Paper/Source:** [title] (URL)
+- **Key insight:** [1-2 sentences]
+- **Applies to our project:** [specific recommendation]
+- **Implementation complexity:** trivial / moderate / significant
 
 ---
 
