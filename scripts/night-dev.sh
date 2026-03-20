@@ -354,78 +354,53 @@ calculate_score() {
 }
 
 # Parse test results from a test output file and extract counts
+# Single-pass awk: tries pytest, jest, cargo patterns + coverage + duration in one invocation
 parse_test_results() {
     local test_output_file="$1"
-    local passing=0 failing=0 total=0 coverage=0 time_s=0
 
     if [[ ! -f "$test_output_file" ]]; then
         echo "0 0 0 0 0"
         return
     fi
 
-    local content
-    content=$(<"$test_output_file")
+    local result
+    result=$(awk '
+        # pytest-style: "X passed, Y failed"
+        /passed/ { for(i=1;i<=NF;i++) if($(i+1)=="passed") py_p=$i }
+        /failed/ { for(i=1;i<=NF;i++) if($(i+1)=="failed") py_f=$i }
 
-    # Try pytest-style output: "X passed, Y failed, Z total"
-    local pytest_match
-    pytest_match=$(awk '
-        /passed/ { for(i=1;i<=NF;i++) if($(i+1)=="passed") p=$i }
-        /failed/ { for(i=1;i<=NF;i++) if($(i+1)=="failed") f=$i }
-        /error/  { for(i=1;i<=NF;i++) if($(i+1)~/^error/) e=$i }
-        END { print p+0, f+0, e+0 }
-    ' <<< "$content")
-    read -r passing failing _ <<< "$pytest_match"
+        # jest/vitest-style: "Tests: X passed, Y failed, Z total"
+        /Tests:.*passed/ { for(i=1;i<=NF;i++) { if($(i+1)=="passed,") js_p=$i; if($(i+1)=="failed,") js_f=$i; if($(i+1)=="total") js_t=$i } }
 
-    # Try npm/jest/vitest style: "Tests: X passed, Y failed, Z total"
-    if [[ $passing -eq 0 ]] && [[ $failing -eq 0 ]]; then
-        local jest_match
-        jest_match=$(awk '
-            /Tests:.*passed/ { for(i=1;i<=NF;i++) { if($(i+1)=="passed,") p=$i; if($(i+1)=="failed,") f=$i; if($(i+1)=="total") t=$i } }
-            END { print p+0, f+0, t+0 }
-        ' <<< "$content")
-        read -r passing failing total <<< "$jest_match"
-    fi
+        # cargo-style: "test result: ok. X passed; Y failed"
+        /test result:/ { for(i=1;i<=NF;i++) { if($(i+1)=="passed;") cg_p=$i; if($(i+1)~/^failed/) cg_f=$i } }
 
-    # Try cargo test style: "test result: ok. X passed; Y failed"
-    if [[ $passing -eq 0 ]] && [[ $failing -eq 0 ]]; then
-        local cargo_match
-        cargo_match=$(awk '
-            /test result:/ { for(i=1;i<=NF;i++) { if($(i+1)=="passed;") p=$i; if($(i+1)~/^failed/) f=$i } }
-            END { print p+0, f+0 }
-        ' <<< "$content")
-        read -r passing failing <<< "$cargo_match"
-    fi
-
-    # Calculate total if not already set
-    if [[ $total -eq 0 ]]; then
-        total=$((passing + failing))
-    fi
-
-    # Try to extract coverage percentage
-    local cov_match
-    cov_match=$(awk '
+        # coverage: line matching "cover" with a percentage
         /[0-9]+(\.[0-9]+)?%/ && /[Cc]over/ {
             match($0, /([0-9]+(\.[0-9]+)?)%/, arr)
-            if (arr[1]+0 > 0) print arr[1]
+            if (arr[1]+0 > 0) cov=arr[1]
         }
-    ' <<< "$content" | tail -1)
-    coverage="${cov_match:-0}"
-    # Truncate to integer for bash math
-    coverage="${coverage%%.*}"
 
-    # Try to extract test duration in seconds
-    local time_match
-    time_match=$(awk '
+        # duration: line matching time/duration/finished/ran with Ns
         /[0-9]+(\.[0-9]+)?s/ && /[Tt]ime|[Dd]uration|[Ff]inished|[Rr]an/ {
             match($0, /([0-9]+(\.[0-9]+)?)s/, arr)
-            if (arr[1]+0 > 0) print arr[1]
+            if (arr[1]+0 > 0) dur=arr[1]
         }
-    ' <<< "$content" | tail -1)
-    time_s="${time_match:-0}"
-    # Truncate to integer for bash math
-    time_s="${time_s%%.*}"
 
-    echo "$passing $failing $total $coverage $time_s"
+        END {
+            p=py_p+0; f=py_f+0; t=0
+            # Fallback to jest if pytest found nothing
+            if (p==0 && f==0) { p=js_p+0; f=js_f+0; t=js_t+0 }
+            # Fallback to cargo if jest found nothing
+            if (p==0 && f==0) { p=cg_p+0; f=cg_f+0 }
+            if (t==0) t=p+f
+            # Truncate coverage and duration to integer
+            c=int(cov+0); d=int(dur+0)
+            print p, f, t, c, d
+        }
+    ' "$test_output_file")
+
+    echo "${result:-0 0 0 0 0}"
 }
 
 # --- Banner ---
