@@ -296,15 +296,14 @@ detect_test_runner() {
     fi
 
     # Generic: Makefile with test target (checked before Go to avoid expensive find)
-    # Pure bash line-by-line regex — no grep fork
+    # Single-read pattern matching — consistent with package.json optimization
     if [[ -f "$project/Makefile" ]]; then
-        local line
-        while IFS= read -r line; do
-            if [[ "$line" =~ ^test[[:space:]]*: ]]; then
-                DETECTED_RUNNER="make test"
-                return 0
-            fi
-        done < "$project/Makefile"
+        local makefile_content
+        makefile_content=$(<"$project/Makefile")
+        if [[ "$makefile_content" =~ (^|$'\n')test[[:space:]]*: ]]; then
+            DETECTED_RUNNER="make test"
+            return 0
+        fi
     fi
 
     # Go: *_test.go files (check root and subdirectories)
@@ -506,16 +505,12 @@ follow_night_dev() {
             [[ -f "$candidate" ]] && latest_log="$candidate"
         fi
     fi
-    # Fallback: check loop dirs in reverse order
+    # Fallback: find latest log via filesystem glob (no hardcoded upper bound)
     if [[ -z "$latest_log" ]]; then
-        local i
-        for ((i=20; i>=1; i--)); do
-            local candidate="$nd_dir/loop-${i}/claude_output.log"
-            if [[ -f "$candidate" ]]; then
-                latest_log="$candidate"
-                break
-            fi
-        done
+        local candidate
+        candidate=$(ls -1d "$nd_dir"/loop-*/claude_output.log 2>/dev/null \
+          | sort -t- -k2 -n | tail -1) || true
+        [[ -n "$candidate" ]] && latest_log="$candidate"
     fi
 
     if [[ -z "$latest_log" ]]; then
@@ -713,6 +708,11 @@ main() {
 
     # --- Project-level permissions for claude -p sub-agents ---
     # Without this, claude -p sessions can't write files or run commands
+    # Validate DETECTED_RUNNER against allowlist to prevent JSON injection via unquoted heredoc
+    case "$DETECTED_RUNNER" in
+      pytest|"npm test"|"cargo test"|"go test ./..."|"make test"|tox) ;;
+      *) echo -e "${RED}Error: Unknown test runner '${DETECTED_RUNNER}' — cannot generate safe settings.json${NC}" >&2; exit 1 ;;
+    esac
     local wt_claude_dir="${WORKTREE_PATH}/.claude"
     mkdir -p "$wt_claude_dir"
     cat > "$wt_claude_dir/settings.json" <<EOSETTINGS
@@ -742,15 +742,6 @@ EOSETTINGS
     TEST_RUNNER="$DETECTED_RUNNER"
 
     # --- Helper Functions ---
-
-    # Update a top-level field in status.json
-    update_status() {
-      local field="$1" value="$2"
-      if [[ "$HAS_JQ" == "true" ]]; then
-        local tmp="${ND_DIR}/status.tmp.json"
-        jq --arg v "$value" ".$field = (\$v | try tonumber catch \$v)" "$ND_DIR/status.json" > "$tmp" && mv "$tmp" "$ND_DIR/status.json"
-      fi
-    }
 
     # --- Cleanup Trap ---
 
@@ -817,6 +808,7 @@ ${SKILL_CONTENT}
     _CIRCUIT_BREAKER_TRIGGERED=false
     CONSECUTIVE_NO_IMPROVEMENT=0
     PREVIOUS_SCORE="0.0"
+    PREVIOUS_SCORE_X10=0
     CACHED_PREV_APPLIED=""
     CACHED_PREV_REVERTED=""
 
@@ -927,8 +919,12 @@ ${PREV_CHANGELOG}"
         local claude_exit=0
         if [[ "$VERBOSE" == "true" ]]; then
           # Stream output to terminal AND log file simultaneously
+          # Use PIPESTATUS[0] to capture Claude's exit code, not tee's
+          set +e
           (cd "$WORKTREE_PATH" && "${claude_cmd[@]}" 2>"$LOOP_DIR/claude_stderr.log") \
-            | tee "$LOOP_DIR/claude_output.log" || claude_exit=$?
+            | tee "$LOOP_DIR/claude_output.log"
+          claude_exit=${PIPESTATUS[0]}
+          set -e
         else
           (cd "$WORKTREE_PATH" && "${claude_cmd[@]}") \
             > "$LOOP_DIR/claude_output.log" 2>"$LOOP_DIR/claude_stderr.log" || claude_exit=$?
@@ -938,6 +934,13 @@ ${PREV_CHANGELOG}"
           echo -e "${YELLOW}WARNING: Claude invocation failed (exit=$claude_exit). Skipping score calculation.${NC}" >&2
           CONSECUTIVE_ZERO=$((CONSECUTIVE_ZERO + 1))
           APPLIED=0; SKIPPED=0; REVERTED=0; ESCALATED=0
+          # Persist consecutive_zero to status.json so it survives script kill between loops
+          if [[ "$HAS_JQ" == "true" ]]; then
+            local tmp="${ND_DIR}/status.tmp.json"
+            jq --argjson cz "$CONSECUTIVE_ZERO" \
+               '.stats.consecutive_zero_applied = $cz' \
+               "$ND_DIR/status.json" > "$tmp" && mv "$tmp" "$ND_DIR/status.json"
+          fi
           continue
         fi
       fi
@@ -969,12 +972,9 @@ ${PREV_CHANGELOG}"
 
       # Defer status.json updates — batch all jq calls into one at end of loop iteration
 
-      # Check score improvement (pure bash: split on '.' and compare as scaled integers)
+      # Check score improvement using raw x10 integers (handles negative scores correctly)
       local improved="no"
-      local ci cf pi pf
-      IFS=. read -r ci cf <<< "$current_score"
-      IFS=. read -r pi pf <<< "$PREVIOUS_SCORE"
-      if (( (ci * 10 + ${cf:-0}) > (pi * 10 + ${pf:-0}) )); then
+      if (( score_x10 > PREVIOUS_SCORE_X10 )); then
         improved="yes"
       fi
       if [[ "$improved" == "yes" ]]; then
@@ -985,6 +985,7 @@ ${PREV_CHANGELOG}"
         echo -e "${YELLOW}Score did not improve (${CONSECUTIVE_NO_IMPROVEMENT}/${STAGNATION_THRESHOLD} stagnant loops)${NC}"
       fi
       PREVIOUS_SCORE="$current_score"
+      PREVIOUS_SCORE_X10=$score_x10
 
       # Single-pass changelog parsing — pure bash pattern matching
       if [[ -f "$LOOP_DIR/changelog.md" ]]; then
@@ -992,10 +993,11 @@ ${PREV_CHANGELOG}"
         local _cl_line
         while IFS= read -r _cl_line; do
           case "$_cl_line" in
-            *APPLICATA*)   APPLIED=$((APPLIED + 1)) ;;
-            *SKIPPATA*)    SKIPPED=$((SKIPPED + 1)) ;;
-            *REVERTITA*)   REVERTED=$((REVERTED + 1)) ;;
-            *ESCALATED*|*URGENTE*) ESCALATED=$((ESCALATED + 1)) ;;
+            *"- APPLICATA"*|*"APPLICATA:"*)   APPLIED=$((APPLIED + 1)) ;;
+            *"- SKIPPATA"*|*"SKIPPATA:"*)     SKIPPED=$((SKIPPED + 1)) ;;
+            *"- REVERTITA"*|*"REVERTITA:"*)   REVERTED=$((REVERTED + 1)) ;;
+            *"- ESCALATED"*|*"- URGENTE"*|*"ESCALATED:"*|*"URGENTE:"*)
+              ESCALATED=$((ESCALATED + 1)) ;;
           esac
         done < "$LOOP_DIR/changelog.md"
 
