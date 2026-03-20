@@ -1,27 +1,31 @@
 # Loop 2 Changelog
 
 ## Summary
-- Applied: 12 tasks
+- Applied: 8 tasks
 - Skipped: 1 task
-- Tests: 29 passed, 0 failed, 0 skipped
+- Urgent: 1 task
+- Tests: 27 passed, 0 failed, 0 skipped
 
 ## Applied Changes
 
-### Batch 1 (commit fa86524)
-- APPLICATA: Fix DATE_TAG date consistency bug + eliminate startup date fork (BUG-02/PERF-11) — files: scripts/night-dev.sh
-- APPLICATA: Eliminate 2-5 date forks for STARTED_AT/DEADLINE_ISO (PERF-12) — files: scripts/night-dev.sh
-- APPLICATA: Consolidate readlink forks in PROJECT_PATH (PERF-15) — files: scripts/night-dev.sh
-- APPLICATA: Replace package.json awk with pure bash (PERF-18) — files: scripts/night-dev.sh
-- APPLICATA: Remove non-existent files from Makefile REQUIRED_REFS (QUALITY-04) — files: Makefile
-
-### Batch 2 (commit a9720e3)
-- APPLICATA: Inline calculate_score arithmetic (PERF-13) — files: scripts/night-dev.sh
-- APPLICATA: Remove dead helper functions (QUALITY-03) — files: scripts/night-dev.sh
-- APPLICATA: Replace echo -e with printf for ANSI injection prevention (SEC-02) — files: scripts/night-dev.sh
-- APPLICATA: Pre-store awk script constant + empty file early exit (PERF-14) — files: scripts/night-dev.sh
-- APPLICATA: Replace changelog awk with pure bash while-read (PERF-17) — files: scripts/night-dev.sh
-- APPLICATA: Defer circuit-breaker status update to cleanup trap (PERF-16) — files: scripts/night-dev.sh
-- APPLICATA: Cache static prompt template before loop (PERF-19) — files: scripts/night-dev.sh
+- APPLICATA: Validate DETECTED_RUNNER against allowlist before heredoc interpolation to prevent JSON injection — files: scripts/night-dev.sh
+- APPLICATA: Fix negative score comparison using raw x10 integers to handle -0.3, -1.5 correctly — files: scripts/night-dev.sh
+- APPLICATA: Tighten changelog patterns with structural anchors ("- APPLICATA" instead of "APPLICATA") — files: scripts/night-dev.sh
+- APPLICATA: Persist consecutive_zero to status.json on Claude failure before continue — files: scripts/night-dev.sh
+- APPLICATA: Use PIPESTATUS[0] for Claude exit code in verbose tee pipeline — files: scripts/night-dev.sh
+- APPLICATA: Remove dead update_status() function with no callers after loop 1 batching — files: scripts/night-dev.sh
+- APPLICATA: Optimize Makefile detection with single-read pattern matching — files: scripts/night-dev.sh
+- APPLICATA: Replace hardcoded follow mode loop-20 limit with filesystem glob — files: scripts/night-dev.sh
 
 ## Skipped Changes
-- SKIPPATA: Magic number in follow mode fallback (deferred, low impact) — QUALITY-05
+- SKIPPATA: jq+printf simplification — reason: low value, deferred
+
+## Urgent (Requires Human Review)
+- URGENTE: Bash permissions allowlist missing commands for sub-agents (npx, echo, find, mkdir, etc.) — requires human review
+
+## METRICHE
+
+- Test: 27 passed, 0 failed, 0 skipped (no change)
+- Coverage: N/A
+- Vulnerabilita: N/A
+- TODO/FIXME: N/A

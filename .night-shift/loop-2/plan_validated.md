@@ -1,268 +1,206 @@
-# Night Shift Task Plan — Loop 2 (Validated)
+# Night Shift Validated Plan — Loop 2
 
-Focus: **PERFORMANCE** (max 12 of 15 tasks allowed)
+Approved: 9 | Skipped: 1 | Urgente: 1
 
-## Task Priority & Risk Analysis
+## TASK-1 — URGENTE
 
-### Risk Gate Results
+**Reason:** Critical security issue (SEC-01) — touches 1 file but has wide impact on sub-agent execution; lacks automated test coverage for sub-agent behavior under new permissions; requires human judgment on permission scope
 
-All 14 issues passed risk gate evaluation:
-- **0 SKIPPED** (no issues met skip criteria: high risk + >5 files, API changes, architectural decisions)
-- **0 URGENT** (no security issues requiring manual human review before auto-apply)
-- **14 APPROVED** (all safe for automated implementation)
+**Action required:** Human review to confirm all necessary commands are included and no overly broad permissions are granted
 
----
+- **Category:** security
+- **Description:** Add missing commands to scoped Bash permissions allowlist — sub-agents silently fail without npx, echo, find, mkdir, head, tail, printf commands needed for CodeIntel indexing, file operations, and diagnostic output
+- **Files:** scripts/night-dev.sh:718-739
+- **Risk:** medium
+- **Verification:** Manually verify settings.json contains all required permission entries: `grep -c "Bash(" .claude/worktree_root/claude-settings/settings.json` should show at least 13 entries; run `claude -p` with test prompt to confirm npx/echo commands work
+- **Solution:** Add these entries to the `allow` array in the generated settings.json at lines 728-739:
+  ```bash
+  "Bash(npx *)",
+  "Bash(echo *)",
+  "Bash(find *)",
+  "Bash(mkdir *)",
+  "Bash(head *)",
+  "Bash(tail *)",
+  "Bash(printf *)",
+  "Bash(cloc *)",
+  "Bash(npm audit *)",
+  "Bash(cargo audit *)"
+  ```
+  Insert after line 732 (after `Bash(cat *)` entry)
+- **Source:** N/A
 
-## Ordered Task List
+## TASK-2 — APPROVED
 
-### TASK-1: Fix date consistency bug (BUG-02) + eliminate startup date fork (PERF-11)
-- **Category**: bug + performance
-- **Priority**: CRITICAL
-- **Description**: Move `DATE_TAG` derivation after `START_TIME` is set and use `printf -v DATE_TAG '%(%Y-%m-%d)T'` builtin instead of `date` fork. Fixes date mismatch when script starts at day boundary; eliminates 1 startup fork.
-- **Files**: `scripts/night-dev.sh`
-- **Risk level**: low
-- **Verification**:
-  - Run script and verify `DATE_TAG` matches `START_TIME` date component
-  - Confirm no `date +%Y-%m-%d` subprocess in tracing (can use `strace -e trace=execve`)
-- **Estimated complexity**: small
-- **Verdict**: APPROVED
-- **Impact**: 1 fork saved at startup; correctness bug fixed
+- **Category:** security
+- **Description:** Prevent variable injection from DETECTED_RUNNER in heredoc — validate test runner against allowlist before interpolation to prevent JSON malformation if runner name contains special characters
+- **Files:** scripts/night-dev.sh:720-730
+- **Risk:** low
+- **Verification:** Run existing tests: `bash scripts/night-dev.sh --help` should still work; grep for test runner detection: `grep -A5 "detect_test_runner" scripts/night-dev.sh | head -20` to confirm validation guard is present
+- **Solution:** Add validation guard after line 717 (after `detect_test_runner()` call):
+  ```bash
+  case "$DETECTED_RUNNER" in
+    pytest|"npm test"|"cargo test"|"go test ./..."|"make test"|tox) ;;
+    *) echo "ERROR: Unknown test runner: $DETECTED_RUNNER" >&2; exit 1 ;;
+  esac
+  ```
+- **Source:** N/A
 
----
+## TASK-3 — APPROVED
 
-### TASK-2: Eliminate 2–5 date forks for STARTED_AT / DEADLINE_ISO initialization (PERF-12)
-- **Category**: performance
-- **Priority**: CRITICAL
-- **Description**: Replace `date -Iseconds` and fallback `date` calls with `printf -v` builtin format specifiers. Currently 2–5 date forks at startup; reduce to 0.
-- **Files**: `scripts/night-dev.sh`
-- **Risk level**: low
-- **Verification**:
-  - Confirm `STARTED_AT` and `DEADLINE_ISO` are set to ISO-8601 format
-  - Verify `status.json` contains valid ISO timestamps in those fields
-  - Timezone format may change from `+00:00` to `+0000` (both valid ISO-8601); verify downstream consumers accept this
-- **Estimated complexity**: small
-- **Verdict**: APPROVED
-- **Impact**: 2–5 forks saved at startup; net time: -2 LOC
+- **Category:** bug
+- **Description:** Fix score comparison for negative scores — use raw x10 integer comparison instead of re-parsing formatted decimal strings to eliminate sign and fractional part handling errors
+- **Files:** scripts/night-dev.sh:950-987
+- **Risk:** low
+- **Verification:** Create test score of "-1.5" and "-0.3", verify improvement detection works correctly: `echo "Testing negative score comparison..." && bash -c 'PREVIOUS_SCORE_X10=0; current_score="-1.5"; score_x10=-15; if (( score_x10 > PREVIOUS_SCORE_X10 )); then echo "PASS: -1.5 correctly identified as improvement"; else echo "FAIL"; fi'`
+- **Solution:** Store score_x10 directly for comparison:
+  1. After line 958 (after `score_x10` calculation), add: `local current_score_x10=$score_x10`
+  2. Initialize `PREVIOUS_SCORE_X10=0` at line 882 alongside `PREVIOUS_SCORE="0.0"`
+  3. Replace lines 973-977 with:
+     ```bash
+     local improved="no"
+     if (( current_score_x10 > PREVIOUS_SCORE_X10 )); then
+       improved="yes"
+     fi
+     ```
+  4. Update line 987 to also set `PREVIOUS_SCORE_X10=$current_score_x10`
+- **Source:** N/A
 
----
+## TASK-4 — APPROVED
 
-### TASK-3: Inline calculate_score arithmetic to eliminate loop subshell fork (PERF-13)
-- **Category**: performance
-- **Priority**: HIGH
-- **Description**: Replace `current_score=$(calculate_score ...)` with direct bash arithmetic at call site (lines 961–966). Saves 1 subshell fork per loop iteration.
-- **Files**: `scripts/night-dev.sh`
-- **Risk level**: low
-- **Verification**:
-  - Run script and verify `current_score` is set correctly (format: `NNN.N`)
-  - Compare output score value before/after; should be identical
-  - Validate test cases continue to pass (27 passed, 0 failed)
-- **Estimated complexity**: small
-- **Verdict**: APPROVED
-- **Impact**: 1 fork saved per loop iteration
+- **Category:** bug
+- **Description:** Tighten changelog pattern matching — require structural anchors (list prefix or colon) around APPLICATA/SKIPPATA/REVERTITA keywords to eliminate false positives from table headers and summary text
+- **Files:** scripts/night-dev.sh:994-998
+- **Risk:** low
+- **Verification:** Run existing changelog parsing tests: `bash scripts/night-dev.sh --status | grep -i "applied\|skipped"` should show correct counts; create a test changelog with mixed content (headers, tables, prose) and verify only properly formatted lines are counted
+- **Solution:** Replace case patterns at lines 994-998:
+  ```bash
+  case "$_cl_line" in
+    *"- APPLICATA"*|*"APPLICATA:"*)   APPLIED=$((APPLIED + 1)) ;;
+    *"- SKIPPATA"*|*"SKIPPATA:"*)     SKIPPED=$((SKIPPED + 1)) ;;
+    *"- REVERTITA"*|*"REVERTITA:"*)   REVERTED=$((REVERTED + 1)) ;;
+    *"- ESCALATED"*|*"- URGENTE"*|*"ESCALATED:"*|*"URGENTE:"*)
+      ESCALATED=$((ESCALATED + 1)) ;;
+  esac
+  ```
+- **Source:** N/A
 
----
+## TASK-5 — APPROVED
 
-### TASK-4: Remove dead helper functions (QUALITY-03)
-- **Category**: quality
-- **Priority**: HIGH
-- **Description**: Remove `update_status_nested()`, `update_score()`, and `append_score_history()` functions (lines 752–783). These are dead code left over from PERF-01 batching optimization; their logic is now in the batched jq block (lines 1031–1051).
-- **Files**: `scripts/night-dev.sh`
-- **Risk level**: low
-- **Verification**:
-  - Grep for `update_status_nested`, `update_score`, `append_score_history` — only definitions should appear (zero call sites)
-  - Run full test suite; all 27 tests should pass
-- **Estimated complexity**: small
-- **Verdict**: APPROVED
-- **Impact**: Code hygiene; -31 LOC removed
+- **Category:** bug
+- **Description:** Ensure status.json is updated on Claude invocation failure — add minimal status update before continue statement to prevent stale consecutive_zero_applied counter if script is killed before next successful loop
+- **Files:** scripts/night-dev.sh:938-941
+- **Risk:** low
+- **Verification:** Trigger a Claude failure (e.g., timeout or network error) and verify status.json consecutive_zero_applied counter is incremented: `jq '.stats.consecutive_zero_applied' .night-shift/status.json`
+- **Solution:** Insert status.json update block before line 941 (before `continue`):
+  ```bash
+  if [[ $claude_exit -ne 0 ]] || [[ ! -s "$LOOP_DIR/claude_output.log" ]]; then
+    echo -e "${YELLOW}WARNING: Claude invocation failed (exit=$claude_exit).${NC}" >&2
+    CONSECUTIVE_ZERO=$((CONSECUTIVE_ZERO + 1))
+    APPLIED=0; SKIPPED=0; REVERTED=0; ESCALATED=0
+    if [[ "$HAS_JQ" == "true" ]]; then
+      local tmp="${ND_DIR}/status.tmp.json"
+      jq --argjson cz "$CONSECUTIVE_ZERO" \
+         '.stats.consecutive_zero_applied = $cz' \
+         "$ND_DIR/status.json" > "$tmp" && mv "$tmp" "$ND_DIR/status.json"
+    fi
+    continue
+  fi
+  ```
+- **Source:** N/A
 
----
+## TASK-6 — APPROVED
 
-### TASK-5: Consolidate readlink forks in PROJECT_PATH initialization (PERF-15)
-- **Category**: performance
-- **Priority**: HIGH
-- **Description**: Combine redundant `readlink -f` test (line 227) and use (line 228) into a single attempt with fallback. Eliminates 1 startup fork.
-- **Files**: `scripts/night-dev.sh`
-- **Risk level**: low
-- **Verification**:
-  - Run with valid project path; confirm `PROJECT_PATH` is set to absolute path
-  - Run with invalid path; confirm error handling falls back to `cd ... && pwd`
-  - No regression in startup time
-- **Estimated complexity**: small
-- **Verdict**: APPROVED
-- **Impact**: 1 fork saved at startup; net LOC: -3
+- **Category:** quality
+- **Description:** Fix verbose mode exit code capture from tee pipeline — use PIPESTATUS[0] to capture Claude exit code instead of $? which returns tee's exit code
+- **Files:** scripts/night-dev.sh:926-934
+- **Risk:** low
+- **Verification:** Run with `--verbose` flag and trigger a Claude failure (exit code != 0); verify claude_exit is set correctly: `bash scripts/night-dev.sh --verbose 2>&1 | grep -i "claude_exit\|WARNING"` should show proper exit code capture
+- **Solution:** Replace lines 926-934 with:
+  ```bash
+  local claude_exit=0
+  if [[ "$VERBOSE" == "true" ]]; then
+    set +e
+    (cd "$WORKTREE_PATH" && "${claude_cmd[@]}" 2>"$LOOP_DIR/claude_stderr.log") \
+      | tee "$LOOP_DIR/claude_output.log"
+    claude_exit=${PIPESTATUS[0]}
+    set -e
+  else
+    (cd "$WORKTREE_PATH" && "${claude_cmd[@]}") \
+      > "$LOOP_DIR/claude_output.log" 2>"$LOOP_DIR/claude_stderr.log" || claude_exit=$?
+  fi
+  ```
+- **Source:** N/A
 
----
+## TASK-7 — SKIPPED
 
-### TASK-6: Replace unsafe echo -e with printf for jq output (SEC-02)
-- **Category**: security
-- **Priority**: HIGH
-- **Description**: In `follow_night_dev()` (line 583), replace `echo -e "$(jq ...)"` with `printf '%s\n'` to prevent ANSI escape sequence injection from `status.json` into terminal.
-- **Files**: `scripts/night-dev.sh`
-- **Risk level**: low
-- **Verification**:
-  - Create `status.json` with crafted ANSI escape in a field (e.g., `\x1b[31m`)
-  - Run in follow mode; verify escape sequences are NOT interpreted (output is literal, not colored)
-  - Normal (non-crafted) status output should appear identical
-- **Estimated complexity**: small
-- **Verdict**: APPROVED
-- **Impact**: Security hardening; blocks ANSI injection from untrusted status.json
+**Reason:** Low-value quality improvement with no functional impact; conflicts with practical priority guidance to skip low-value changes like this
 
----
+- **Category:** quality
+- **Description:** Simplify follow mode jq+printf redundancy — remove printf wrapper and use jq -r output directly for cleaner code
+- **Files:** scripts/night-dev.sh:581
+- **Risk:** low
+- **Verification:** Run follow mode: `bash scripts/night-dev.sh --follow` and verify status output displays correctly without printf
+- **Solution:** Replace line 581 jq expression to output directly without printf wrapper; remove `printf '%s\n'` and command substitution
+- **Source:** N/A
 
-### TASK-7: Pre-store awk script constant and add empty-file optimization (PERF-14)
-- **Category**: performance
-- **Priority**: MEDIUM
-- **Description**: Move inline awk script from `parse_test_results` (lines 367–401) to a module-level constant `_PARSE_AWK_SCRIPT`. Add early-exit for empty files to avoid awk invocation on uninitialized logs.
-- **Files**: `scripts/night-dev.sh`
-- **Risk level**: low
-- **Verification**:
-  - Verify `parse_test_results` output on non-empty test logs matches previous behavior
-  - Verify empty test logs return "0 0 0 0 0" without awk fork
-  - Check that the awk script variable is readonly and not accidentally modified
-- **Estimated complexity**: small
-- **Verdict**: APPROVED
-- **Impact**: Marginal bash parse overhead reduction; ~1 awk fork avoided on empty logs per loop
+## TASK-8 — APPROVED
 
----
+- **Category:** quality
+- **Description:** Remove dead code update_status() function — no longer called after loop 1 batching optimization; function definition at lines 746-753 can be safely deleted
+- **Files:** scripts/night-dev.sh:746-753
+- **Risk:** low
+- **Verification:** Grep for function calls: `grep -n "update_status" scripts/night-dev.sh` should return only the function definition (lines 746-753); verify no references remain; run existing tests to confirm no breakage
+- **Solution:** Delete lines 746-753 (the `update_status()` function definition). Verify with grep that no callers remain in the file.
+- **Source:** N/A
 
-### TASK-8: Replace changelog awk with pure bash while-read loop (PERF-17)
-- **Category**: performance
-- **Priority**: MEDIUM
-- **Description**: Replace awk subprocess (lines 992–999) with bash `while IFS= read -r` loop using glob pattern matching. Eliminates 1 awk fork per loop iteration.
-- **Files**: `scripts/night-dev.sh`
-- **Risk level**: low
-- **Verification**:
-  - Verify `APPLIED`, `SKIPPED`, `REVERTED`, `ESCALATED` counts match previous awk output on test changelog
-  - Test edge cases: empty changelog, missing patterns, multiple occurrences per line
-  - Pattern matching: `APPLICATA`, `SKIPPATA`, `REVERTITA` glob matches; `ESCALATED|URGENTE` regex match
-- **Estimated complexity**: small
-- **Verdict**: APPROVED
-- **Impact**: 1 fork saved per loop iteration
+## TASK-9 — APPROVED
 
----
+- **Category:** quality
+- **Description:** Optimize Makefile test target detection for consistency — replace while-read loop with single-read pattern matching approach matching package.json optimization from loop 1
+- **Files:** scripts/night-dev.sh:300-308
+- **Risk:** low
+- **Verification:** Run test runner detection on a project with Makefile: `bash scripts/night-dev.sh --analyze path/to/go_project` should correctly detect `make test` runner; verify regex correctly matches `test:` at line start
+- **Solution:** Replace lines 300-308 Makefile while-read loop with:
+  ```bash
+  if [[ -f "$project/Makefile" ]]; then
+    local makefile_content
+    makefile_content=$(<"$project/Makefile")
+    if [[ "$makefile_content" =~ (^|$'\n')test[[:space:]]*: ]]; then
+      DETECTED_RUNNER="make test"
+      return 0
+    fi
+  fi
+  ```
+- **Source:** N/A
 
-### TASK-9: Replace package.json awk with pure bash while-read loop (PERF-18)
-- **Category**: performance
-- **Priority**: MEDIUM
-- **Description**: In `detect_test_runner()` (lines 279–288), replace awk with bash `while` loop. Detect `"test"` key and `no test specified` patterns using glob/regex matching instead of awk fork.
-- **Files**: `scripts/night-dev.sh`
-- **Risk level**: low
-- **Verification**:
-  - Test with real `package.json` files from various projects (React, Node, Python with test script)
-  - Verify `DETECTED_RUNNER` is set correctly (should be "npm test" for standard projects)
-  - Edge case: missing `package.json` should handle gracefully
-- **Estimated complexity**: small
-- **Verdict**: APPROVED
-- **Impact**: 1 fork saved at startup
+## TASK-10 — APPROVED
 
----
-
-### TASK-10: Defer circuit-breaker status update to cleanup trap (PERF-16)
-- **Category**: performance
-- **Priority**: MEDIUM
-- **Description**: Move `update_status "circuit_breaker" "OPEN"` (line 851) out of the main loop. Instead, set a flag variable and apply the update in `cleanup()` trap alongside phase completion. Eliminates extra jq fork on circuit-breaker activation.
-- **Files**: `scripts/night-dev.sh`
-- **Risk level**: low
-- **Verification**:
-  - Trigger circuit breaker condition (`CONSECUTIVE_ZERO >= threshold`)
-  - Verify `status.json` has `circuit_breaker: "OPEN"` after script exits
-  - Confirm status update happens even if script is interrupted (cleanup trap runs)
-- **Estimated complexity**: small
-- **Verdict**: APPROVED
-- **Impact**: 1 jq fork deferred per circuit-breaker activation (rare event); code consistency improved
-
----
-
-### TASK-11: Build prompt once, interpolate dynamics per loop (PERF-19)
-- **Category**: performance
-- **Priority**: LOW
-- **Description**: Cache the static portion of `LOOP_PROMPT` (SKILL.md + fixed text) before the loop. Only interpolate dynamic fields (loop number, current score, changelog summary) per iteration. Reduces string reconstruction overhead.
-- **Files**: `scripts/night-dev.sh`
-- **Risk level**: low
-- **Verification**:
-  - Verify `LOOP_PROMPT` content is identical to previous behavior per loop iteration
-  - Check that dynamic variables (loop number, score, changelog) are correctly interpolated
-  - No regression in prompt format or Claude's ability to parse context
-- **Estimated complexity**: medium
-- **Verdict**: APPROVED
-- **Impact**: String allocation overhead reduction; marginal per-iteration savings
-
----
-
-### TASK-12: Resolve Makefile REQUIRED_REFS inconsistency (QUALITY-04)
-- **Category**: quality
-- **Priority**: LOW
-- **Description**: `Makefile` lists `risk-gate-prompt.md` and `codeintel-reference.md` as required, but both files are missing and never validated. Remove these from `REQUIRED_REFS` or create stub files. Currently misleading to claim they're "required."
-- **Files**: `Makefile`
-- **Risk level**: low
-- **Verification**:
-  - `make check-required` should list only actually-required files
-  - Verify test suite passes after removal (REQUIRED_REFS change does not affect tests)
-- **Estimated complexity**: small
-- **Verdict**: APPROVED
-- **Impact**: Clarity; accurate representation of actual dependencies
+- **Category:** performance
+- **Description:** Fix follow mode log file discovery hardcoded upper bound — use dynamic filesystem globbing instead of hardcoded loop-20 limit to support --max-loops > 20
+- **Files:** scripts/night-dev.sh:510-518
+- **Risk:** low
+- **Verification:** Set `--max-loops 50` and create test loops up to loop-30; run follow mode and verify it finds the latest log file correctly: `ls -1d .night-shift/loop-*/claude_output.log | tail -1` should match what follow mode finds
+- **Solution:** Replace lines 510-518 fallback loop with:
+  ```bash
+  if [[ -z "$latest_log" ]]; then
+    local candidate
+    candidate=$(ls -1d "$nd_dir"/loop-*/claude_output.log 2>/dev/null \
+      | sort -t- -k2 -n | tail -1)
+    [[ -n "$candidate" ]] && latest_log="$candidate"
+  fi
+  ```
+- **Source:** N/A
 
 ---
 
-## Not Implemented (Deferred)
+## Parallel Batch Groups
 
-### SKIPPED: QUALITY-05 — Fix magic number in follow mode fallback
-- **Reason**: Low impact; fallback is for an edge case (missing logs). The bound of 20 is a heuristic; using `MAX_LOOPS` would require refactoring fallback logic. Deferred to loop 3 as lower priority.
-- **Alternative**: Could use `ls -1d ... | sort | tail -1` for dynamic latest log discovery, but requires testing with edge cases.
+Based on file overlap analysis, these tasks can be executed in parallel batches:
 
----
+- **Batch 1 (Bash permissions & validation):** TASK-1, TASK-2 (both touch security config at lines 718-739)
+- **Batch 2 (Score & changelog logic):** TASK-3, TASK-4 (non-overlapping logic fixes)
+- **Batch 3 (Error handling & exit codes):** TASK-5, TASK-6 (Claude invocation flow)
+- **Batch 4 (Cleanup & optimization):** TASK-8, TASK-9, TASK-10 (non-overlapping cleanup & perf improvements)
+- **Skipped:** TASK-7 (deferred as low-value)
 
-## Summary
-
-| Category | Count | Issues |
-|----------|-------|--------|
-| Security | 1 | SEC-02 |
-| Bug | 1 | BUG-02 (combined with PERF-11) |
-| Performance | 8 | PERF-11, PERF-12, PERF-13, PERF-14, PERF-15, PERF-16, PERF-17, PERF-18, (PERF-19) |
-| Quality | 2 | QUALITY-03, QUALITY-04 |
-| **Total Approved** | **12** | **All safe for auto-apply** |
-| **Total Deferred** | **2** | QUALITY-05, PERF-19 (moved to lower priority) |
-
-### Implementation Order
-
-1. **Startup path optimization** (run once per invocation):
-   - TASK-1: Fix DATE_TAG + BUG-02
-   - TASK-2: Fix STARTED_AT/DEADLINE_ISO dates
-   - TASK-5: Consolidate readlink
-   - TASK-9: Replace package.json awk
-
-2. **Loop-iteration optimization** (run per iteration):
-   - TASK-3: Inline calculate_score
-   - TASK-7: Pre-store awk constant
-   - TASK-8: Replace changelog awk
-   - TASK-11: Cache prompt template
-
-3. **Error handling + code hygiene**:
-   - TASK-4: Remove dead functions
-   - TASK-6: Fix echo -e security issue
-   - TASK-10: Defer circuit-breaker update
-   - TASK-12: Fix Makefile REQUIRED_REFS
-
-### Performance Impact Summary
-
-**Startup (one-time):**
-- Eliminated forks: 6–8 (date calls, readlink, package.json awk)
-- Estimated savings: ~10–20ms
-
-**Per-loop iteration:**
-- Eliminated forks: 2–3 (calculate_score subshell, changelog awk, parse awk on empty files)
-- Estimated savings: ~3–8ms per loop (5 loops = 15–40ms total)
-
-**Code quality:**
-- Removed dead code: ~31 lines
-- Security hardening: 1 escape injection vulnerability closed
-- Accuracy: Fixed date consistency bug
-
-**Risk profile:**
-- All 12 tasks: LOW risk
-- All use well-established bash idioms (printf builtin, parameter expansion, arithmetic)
-- Backward compatible with bash 4.2+ (script already requires bash 5.0+ features)
-
----
-
-**Generated:** 2026-03-20 | **Plan Status:** READY FOR IMPLEMENTATION
+**Total actionable tasks:** 9 approved + 1 urgent (TASK-1) + 1 skipped = 11 issues processed

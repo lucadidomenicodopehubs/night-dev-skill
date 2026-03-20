@@ -1,70 +1,177 @@
 # Night Shift Audit — Loop 2
 
-Focus: **PERFORMANCE** (80%) | Other (20%)
-
-Previous loop applied: PERF-01, PERF-03, PERF-05, PERF-06, PERF-07, PERF-08
-Previous loop skipped: PERF-02, PERF-04, SEC-01, QUALITY-01, QUALITY-02
+**Date:** 2026-03-20
+**Project:** night-dev-skill (autonomous evolutionary development agent)
+**Main file:** scripts/night-dev.sh (1072 lines)
+**Focus:** Incremental audit on loop 1 changes + remaining issues
 
 ---
 
 ## Metrics
-- Tests: 27 passed, 0 failed, 2 skipped
-- Coverage: not available
-- Files: 5 source | LOC: ~1550 | TODO/FIXME/HACK: 0
-- Security audit: no tool available (bash project)
-- Execution time: N/A (no regression from loop 1)
+
+- Tests: 27 passed, 0 failed, 2 skipped (29 total)
+- Coverage: 0% (no coverage tooling for bash)
+- Execution time: ~0.05s
+- Files: 10 source | LOC: ~2600 | TODO/FIXME/HACK: 0
+- Score: 328.0
+
+---
 
 ## Issues Found
 
-Total: 14 issues (1 security, 1 bug, 9 performance, 0 cost, 3 quality)
-
 ### SECURITY
 
-1. **SEC-02 [MEDIUM]** `scripts/night-dev.sh:583` — Unsanitized jq output interpolated into echo. The line `echo -e "$(jq -r '...' "$status_file")"` in `follow_night_dev()` passes raw jq output through `echo -e`, which interprets escape sequences. If `status.json` contains crafted values (e.g., `\x1b[...` ANSI escape sequences in a field), they will be interpreted by the terminal. **Fix:** Use `printf '%s\n'` instead of `echo -e` for data output, or pipe jq output directly to stdout without echo interpolation.
+#### SEC-01 [MEDIUM] scripts/night-dev.sh:718-739
+
+**Scoped Bash permissions are insufficient for sub-agent operations.**
+
+Loop 1 correctly replaced `Bash(*)` with a scoped allowlist (TASK-01). However, the current allowlist is missing commands that SKILL.md sub-agents need:
+
+- `npx` — needed for CodeIntel indexing (referenced at analyze-prompt.md for `npx tsx ... analyze`)
+- `echo` — sub-agents use `echo` to write files like `research.md` skip markers (SKILL.md line 251: `echo "Research skipped..."`)
+- `find` — needed by analyze-prompt.md for codebase scanning (Step 0.2), and by `detect_test_runner` for Go test file discovery
+- `mkdir` — agents may need to create directories for new files
+- `cloc` — referenced in audit-prompt.md for LOC counting
+- `pip audit` / `npm audit` / `cargo audit` — referenced in audit-prompt.md Step 0.4
+- `head` / `tail` — common for log inspection by report agents
+- `printf` — used by agents for output formatting
+
+The `defaultMode: auto` setting will prompt for these commands, but since `claude -p` (prompt mode) runs non-interactively, missing permissions will cause silent failures or blocks.
+
+**Fix:** Add commonly needed commands to the allowlist: `"Bash(npx *)"`, `"Bash(echo *)"`, `"Bash(find *)"`, `"Bash(mkdir *)"`, `"Bash(head *)"`, `"Bash(tail *)"`, `"Bash(printf *)"`. Alternatively, use `"Bash(npx tsx *)"` for tighter scoping on CodeIntel. Note: `Read(*)` and `Write(*)` permissions handle most file operations, but command-line tools may still be needed.
+
+#### SEC-02 [LOW] scripts/night-dev.sh:718
+
+**Settings.json uses unquoted heredoc, enabling variable injection in DETECTED_RUNNER.**
+
+The heredoc `<<EOSETTINGS` (without quotes) means `${DETECTED_RUNNER}` is expanded by bash. If a malicious `Makefile` or `package.json` causes `detect_test_runner()` to set `DETECTED_RUNNER` to a value containing `"`, `}`, or other JSON-breaking characters, the generated `settings.json` would be malformed or could inject additional permissions. For example, a `package.json` with `"test": "echo 'injected\"], \"Bash(*)\", [\"more"` would break the JSON structure.
+
+Current risk is low because `DETECTED_RUNNER` is set to one of a few hardcoded values (`pytest`, `npm test`, `cargo test`, `go test ./...`, `make test`, `tox`). But the Makefile detection path (lines 300-308) reads the project's Makefile line by line and could be extended in the future.
+
+**Fix:** Validate `DETECTED_RUNNER` against an allowlist of known values before interpolation, or use `jq` to construct the JSON safely: `jq -n --arg runner "$DETECTED_RUNNER" '{permissions: {allow: [("Bash(" + $runner + ")"), ...]}}'`.
+
+---
 
 ### BUG
 
-1. **BUG-02 [MEDIUM]** `scripts/night-dev.sh:606` — `DATE_TAG` uses `date +%Y-%m-%d` which forks a subprocess, but more importantly it is computed independently of `START_TIME`. If the script starts at 23:59:59 and `date` is called a fraction of a second later, `DATE_TAG` could be tomorrow while `START_TIME` is today. This causes the branch name (`night-dev/2025-03-21`) and backup dir to reference a different date than `DEADLINE` calculations. **Fix:** Derive `DATE_TAG` from `START_TIME` using `printf '%(%Y-%m-%d)T' "$START_TIME"` (bash 4.2+ builtin, no fork) to ensure consistency and eliminate a subprocess.
+#### BUG-01 [MEDIUM] scripts/night-dev.sh:975-977
+
+**Score comparison still broken for negative scores with fractional parts.**
+
+This was identified as BUG-03 (LOW) in loop 1 but not fixed. The comparison logic at line 977:
+```bash
+if (( (ci * 10 + ${cf:-0}) > (pi * 10 + ${pf:-0}) )); then
+```
+fails for negative scores. When `current_score="-1.5"`, `IFS=. read` splits it into `ci="-1"` and `cf="5"`. The expression becomes `(-1 * 10 + 5) = -5`, but the actual value is `-1.5` which should be `-15` in x10 representation. The fractional part should be subtracted, not added, when the integer part is negative.
+
+Similarly, for `current_score="-0.3"`, the sign is in `ci="-0"` and `cf="3"`. Expression: `(-0 * 10 + 3) = 3`, but the real value is `-0.3` = `-3` in x10 representation. The sign on `-0` is lost in arithmetic.
+
+While negative scores are unlikely in practice (requires many failing tests or no passing tests), the score formatting was just fixed in loop 1 to correctly produce negative scores, making this comparison path reachable.
+
+**Fix:** Use the `score_x10` integer directly for comparison instead of re-parsing the formatted string. Store `score_x10` alongside `current_score` and compare the raw integers: `if (( current_score_x10 > previous_score_x10 )); then`.
+
+#### BUG-02 [MEDIUM] scripts/night-dev.sh:994-998
+
+**Overly broad changelog pattern matching counts false positives.**
+
+Loop 1 changed the changelog parsing from strict patterns (`*[-\*]\ APPLICATA\ :*`) to very broad ones (`*APPLICATA*`). This was intended to be more resilient (QUALITY-02/TASK-11), but now ANY line containing the word "APPLICATA" increments the counter. This includes:
+
+- Section headers like `## Changes Applied` followed by markdown table headers containing "APPLICATA" as a column value
+- The loop 1 changelog itself contains `## Category Breakdown` with a table row `| SECURITY | 2 | Applied |` — while "Applied" does not match, other formatting could
+- Lines like `Previously: 10 Applied / 1 Monitoring` or `All tasks verified: APPLICATA` in summary text
+- The word appearing in comments, descriptions, or status text
+
+The loop 1 changelog has 10 lines matching `*APPLICATA*`, all legitimate. But a report agent producing a summary table like `| TASK-1 | test | +36 | APPLICATA |` would count the table header AND the data row if both contain the keyword.
+
+**Fix:** Add minimal structure requirements back: match `*- APPLICATA*` or `*APPLICATA:*` to require either a list prefix or a colon suffix. This is still more lenient than the original pattern but eliminates table headers and summary text.
+
+#### BUG-03 [LOW] scripts/night-dev.sh:940
+
+**Claude failure path sets APPLIED/SKIPPED/REVERTED/ESCALATED but does not update status.json.**
+
+When Claude invocation fails (exit != 0 or empty output), line 940 sets `APPLIED=0; SKIPPED=0; REVERTED=0; ESCALATED=0` and continues. However, the batched status.json update at lines 1033-1053 is skipped because `continue` jumps to the next iteration. The `CONSECUTIVE_ZERO` counter is incremented (line 939), but this value is only written to status.json in the next successful loop's batch update. If the script is killed between a failed loop and the next successful one, status.json will show stale data.
+
+**Fix:** Move the status.json update block (or a minimal version of it) before the `continue` statement, or move the `continue` after the status update block.
+
+---
+
+### INTENT
+
+*No new intent issues found. SKILL.md scoring formula was synchronized in loop 1.*
+
+---
+
+### ARCHITECTURE
+
+#### ARCH-01 [LOW] scripts/night-dev.sh:747-753
+
+**`update_status()` function is still defined but only used by cleanup() indirectly.**
+
+After loop 1's batching optimization (TASK-04), the main loop uses a batched jq expression for all status updates. The `update_status()` helper function (lines 747-753) remains defined but is no longer called anywhere in the current code. The cleanup function at lines 768-775 uses its own inline batched jq call. This is dead code.
+
+**Fix:** Remove `update_status()` (lines 744-753) to reduce code complexity. If it's kept as a utility for future use, add a comment indicating it's intentionally retained.
+
+---
 
 ### PERFORMANCE
 
-1. **PERF-11 [HIGH]** `scripts/night-dev.sh:606` — `date +%Y-%m-%d` forks a subprocess for `DATE_TAG`. Bash 4.2+ has `printf '%(%Y-%m-%d)T'` as a builtin that avoids the fork entirely. This is on the startup hot path. **Fix:** Replace `DATE_TAG=$(date +%Y-%m-%d)` with `printf -v DATE_TAG '%(%Y-%m-%d)T' -1` (or use `$START_TIME` after it is set, which also fixes BUG-02).
+#### PERF-01 [LOW] scripts/night-dev.sh:512
 
-2. **PERF-12 [HIGH]** `scripts/night-dev.sh:647-648` — Three `date` subprocess forks for `STARTED_AT` and `DEADLINE_ISO`. Line 647 has up to 2 forks (try GNU date, fallback to manual format). Line 648 has up to 3 forks (try GNU `-d`, then BSD `-r`, then fallback). Total: 2-5 `date` forks at initialization. **Fix:** Use `printf '%(%Y-%m-%dT%H:%M:%S%z)T'` for `STARTED_AT` (bash builtin, zero forks). For `DEADLINE_ISO`, use `printf '%(%Y-%m-%dT%H:%M:%S%z)T' "$DEADLINE"`. This eliminates all `date` forks in initialization.
+**Follow mode fallback uses hardcoded upper bound of 20 for loop scan.**
 
-3. **PERF-13 [MEDIUM]** `scripts/night-dev.sh:961,966` — `parse_test_results` and `calculate_score` are called via command substitution (`$(...)`) which creates subshell forks. Both functions only produce a single line of output consumed by `read`. **Fix:** Use `printf -v` inside the functions to set variables directly, or pipe output to `read` without capturing in a subshell. For `calculate_score`, the function is trivial bash arithmetic — inline it at the call site to avoid both the function call overhead and the subshell: `local score_x10=$(( (cur_passing*100) + (cur_total*20) + (cur_coverage*50) - (cur_failing*200) - cur_time_s )); current_score="$((score_x10/10)).$((score_x10%10<0 ? -(score_x10%10) : score_x10%10))"`.
+The fallback loop `for ((i=20; i>=1; i--))` at line 512 scans for log files from loop-20 down to loop-1. If `--max-loops` is set higher than 20, logs from later loops would be missed. This is a minor issue since the primary path (jq-based lookup at lines 501-507) handles this correctly.
 
-4. **PERF-14 [MEDIUM]** `scripts/night-dev.sh:367-401` — `parse_test_results` spawns awk via `$(awk ...)` command substitution. The awk invocation reads the entire test output file. For large Claude output logs (can be 10K+ lines), this is a significant read. The function could first check file size and skip parsing if empty. More importantly, the awk script could be stored in a variable at script startup instead of being re-parsed by bash on each invocation. **Fix:** Store the awk script in a variable (`PARSE_AWK_SCRIPT='...'`) at the top of the script and reference it: `awk "$PARSE_AWK_SCRIPT" "$test_output_file"`. This avoids bash re-parsing the heredoc/string on each call.
+**Fix:** Use a dynamic approach: `ls -1d "$nd_dir"/loop-*/claude_output.log 2>/dev/null | sort -t- -k2 -n | tail -1` or iterate from a reasonable max like 100.
 
-5. **PERF-15 [MEDIUM]** `scripts/night-dev.sh:228-231` — `readlink -f` and fallback `cd ... && pwd` both fork subprocesses to resolve the project path. The `readlink -f` test on line 227 forks a subprocess just to check if readlink works, then line 228 forks again to actually use it. **Fix:** Combine into a single attempt: `PROJECT_PATH=$(readlink -f "$PROJECT_PATH" 2>/dev/null) || PROJECT_PATH=$(cd "$PROJECT_PATH" && pwd)`. This eliminates one redundant fork.
+#### PERF-02 [LOW] scripts/night-dev.sh:523-534
 
-6. **PERF-16 [MEDIUM]** `scripts/night-dev.sh:744-783` — `update_status()`, `update_status_nested()`, `update_score()`, and `append_score_history()` are defined but only partially used. The main loop correctly batches updates (line 1031-1051), but `update_status` is still called individually on line 811 (cleanup trap) and line 851 (circuit breaker). Each call forks jq, reads/writes the file. **Fix:** The cleanup call (line 811) is unavoidable (runs at exit). But the circuit breaker update (line 851) could be deferred to the batched update block. Add circuit breaker state to the batch jq expression.
+**Follow mode wait loop and inline mode wait loop use fixed polling intervals.**
 
-7. **PERF-17 [LOW]** `scripts/night-dev.sh:992-998` — Changelog parsing with awk forks a subprocess on every loop iteration. The awk script is simple pattern matching that could be done in pure bash using `while read` + case/pattern matching. For small changelog files (typically <50 lines), the overhead difference is marginal, but it eliminates one fork per loop. **Fix:** Replace with a bash `while IFS= read -r line` loop that counts `APPLICATA`, `SKIPPATA`, `REVERTITA`, `ESCALATED` patterns using `[[ "$line" == *APPLICATA* ]]` checks.
+Follow mode polls every 2 seconds (line 533) waiting for the first log file, and inline mode polls every 5 seconds (line 914) waiting for the done marker. Neither uses backoff. For long-running operations, this produces unnecessary I/O.
 
-8. **PERF-18 [LOW]** `scripts/night-dev.sh:281` — `detect_test_runner` forks awk to parse `package.json` for the test script. This could use a bash `while read` loop with pattern matching instead, since it only needs to detect two patterns (`"test"` key and `no test specified`). **Fix:** Replace awk with: `local has_test=0 has_placeholder=0; while IFS= read -r line; do [[ "$line" == *'"test"'* ]] && has_test=1; [[ "$line" == *'no test specified'* ]] && has_placeholder=1; done < "$project/package.json"`.
+**Fix:** Implement simple exponential backoff: start at 2s, double up to 30s max.
 
-9. **PERF-19 [LOW]** `scripts/night-dev.sh:820` — SKILL.md content is cached via `$(<file)` which is efficient. However, this ~385-line file is then string-interpolated into `LOOP_PROMPT` on every loop iteration (line 917). The entire prompt string (SKILL.md + context) is rebuilt every iteration even though SKILL.md content never changes. **Fix:** Build the static portion of the prompt once before the loop, and only interpolate the dynamic context variables (loop number, score, changelog) on each iteration. Use `printf` with format string to avoid reconstructing the full string.
-
-### BUG
-
-*No additional bugs found beyond BUG-02 above.*
+---
 
 ### COST
 
 *No issues found.*
 
+---
+
 ### QUALITY
 
-1. **QUALITY-03 [MEDIUM]** `scripts/night-dev.sh:744-783` — Four helper functions (`update_status`, `update_status_nested`, `update_score`, `append_score_history`) are defined inside `main()` but only `update_status` is called outside the batched block (lines 811, 851). The other three (`update_status_nested`, `update_score`, `append_score_history`) are never called anywhere — they are dead code after the PERF-01 batching optimization in loop 1. **Fix:** Remove `update_status_nested()`, `update_score()`, and `append_score_history()` since their logic is now handled by the inline batched jq expression at lines 1031-1051.
+#### QUALITY-01 [MEDIUM] scripts/night-dev.sh:930-931
 
-2. **QUALITY-04 [MEDIUM]** `Makefile:9-11` — `REQUIRED_REFS` lists `risk-gate-prompt.md` and `codeintel-reference.md` but both are missing and always SKIP. The test suite never fails on these missing files, making the "required" designation misleading. Either create stub files or remove them from `REQUIRED_REFS` to accurately represent what's actually required. **Fix:** Remove `risk-gate-prompt.md` and `codeintel-reference.md` from `REQUIRED_REFS`, or create minimal placeholder files.
+**Verbose mode tee pipeline masks Claude exit code.**
 
-3. **QUALITY-05 [LOW]** `scripts/night-dev.sh:514-520` — Follow mode fallback loop iterates from 20 down to 1 checking for log files. The upper bound of 20 is a magic number with no connection to `MAX_LOOPS` (default 5). If someone runs with `--max-loops 50`, this fallback would miss loops 21-50. **Fix:** Either use `MAX_LOOPS` as the upper bound or use `ls -1d "$nd_dir"/loop-*/claude_output.log 2>/dev/null | sort -t- -k2 -n | tail -1` to find the latest log dynamically.
+In verbose mode, the command `(cd ... && "${claude_cmd[@]}" ...) | tee "$LOOP_DIR/claude_output.log" || claude_exit=$?` captures the exit code of `tee`, not `claude`. In a pipeline, `$?` returns the exit status of the last command (`tee`), which almost always succeeds. So `claude_exit` will be 0 even if Claude fails. The non-verbose path (lines 933-934) correctly captures Claude's exit code because there is no pipeline.
 
-### INTENT
+**Fix:** Use `set -o pipefail` (already set via `set -euo pipefail` at line 2) — this should propagate the failure. However, the `|| claude_exit=$?` construct suppresses the pipefail behavior because the overall command succeeds via the `||`. Instead, use `PIPESTATUS`: after the pipeline, check `claude_exit=${PIPESTATUS[0]}` to get the exit code of the first pipeline command (the Claude subshell).
 
-*No new intent issues found beyond those documented in loop 1 project_intent.md.*
+#### QUALITY-02 [MEDIUM] scripts/night-dev.sh:581
+
+**Follow mode completion summary uses complex jq string interpolation.**
+
+Line 581 uses `printf '%s\n' "$(jq -r '...' "$status_file")"` which is correct (fixed from `echo -e` safety). However, the jq expression uses string interpolation inside a single-quoted bash string, making it hard to read and maintain. The double-quoting of the jq output through `$()` and then `printf` is also redundant — jq output can be printed directly.
+
+**Fix:** Simplify to `jq -r '"Applied: ..." ' "$status_file"` without the `printf` wrapper, since `jq -r` already outputs raw strings to stdout.
+
+#### QUALITY-03 [LOW] scripts/night-dev.sh:300-308
+
+**Makefile test target detection reads entire file line-by-line.**
+
+The `detect_test_runner` function reads the project Makefile line by line (lines 300-308) using a `while IFS= read -r line` loop to find `^test:` targets. This is inconsistent with the package.json optimization applied in loop 1 (TASK-07), which switched from line-by-line to single-read pattern matching. For consistency, the Makefile detection could also use a single-read approach.
+
+**Fix:** Replace with: `local content; content=$(<"$project/Makefile"); if [[ "$content" =~ $'\n'test[[:space:]]*: ]]; then DETECTED_RUNNER="make test"; return 0; fi`. Note: the regex approach is slightly different because the match must be at the start of a line, which is harder with glob patterns.
+
+#### QUALITY-04 [LOW] commands/night-dev.md
+
+**Interactive setup guide is entirely in Italian without English alternative.**
+
+Carried forward from loop 1 audit (QUALITY-06). The `commands/night-dev.md` file contains user-facing prompts in Italian only. This limits accessibility for non-Italian-speaking users.
+
+**Fix:** Consider adding English translations or making the language configurable. Low priority as this may be intentional for the target audience.
 
 ---
 
@@ -72,17 +179,19 @@ Total: 14 issues (1 security, 1 bug, 9 performance, 0 cost, 3 quality)
 
 | Category | Critical | High | Medium | Low |
 |----------|----------|------|--------|-----|
-| Security | 0 | 0 | 1 | 0 |
-| Bugs | 0 | 0 | 1 | 0 |
-| Performance | 0 | 2 | 4 | 3 |
-| Cost | 0 | 0 | 0 | 0 |
-| Quality | 0 | 0 | 2 | 1 |
-| **Total** | **0** | **2** | **8** | **4** |
+| SECURITY | 0 | 0 | 1 | 1 |
+| BUG | 0 | 0 | 2 | 1 |
+| INTENT | 0 | 0 | 0 | 0 |
+| ARCHITECTURE | 0 | 0 | 0 | 1 |
+| PERFORMANCE | 0 | 0 | 0 | 2 |
+| COST | 0 | 0 | 0 | 0 |
+| QUALITY | 0 | 0 | 2 | 2 |
+| **Total** | **0** | **0** | **5** | **7** |
 
 ### Top 5 Actionable Items (by impact):
 
-1. **PERF-11 + BUG-02** (HIGH): Replace `date +%Y-%m-%d` with `printf -v DATE_TAG '%(%Y-%m-%d)T'` — eliminates 1 fork and fixes date consistency bug
-2. **PERF-12** (HIGH): Replace 2-5 `date` forks in STARTED_AT/DEADLINE_ISO with `printf '%(...) T'` builtins — eliminates all date forks at initialization
-3. **PERF-13** (MEDIUM): Inline `calculate_score` at call site — eliminates 2 subshell forks per loop iteration
-4. **QUALITY-03** (MEDIUM): Remove 3 dead helper functions left over from PERF-01 batching — reduces code by ~30 lines
-5. **PERF-15** (MEDIUM): Combine redundant readlink test+use into single attempt — eliminates 1 fork at startup
+1. **SEC-01** (MEDIUM): Add missing commands to scoped Bash permissions allowlist -- sub-agents may silently fail on `npx`, `echo`, `find`, `mkdir` operations
+2. **BUG-01** (MEDIUM): Fix score comparison for negative scores -- use raw x10 integers instead of re-parsing formatted strings
+3. **BUG-02** (MEDIUM): Tighten changelog pattern matching -- `*APPLICATA*` is too broad, use `*- APPLICATA*` to require list prefix
+4. **QUALITY-01** (MEDIUM): Fix verbose mode exit code capture -- use `PIPESTATUS[0]` instead of `$?` after tee pipeline
+5. **ARCH-01** (LOW): Remove dead `update_status()` function -- no longer called after loop 1 batching optimization
