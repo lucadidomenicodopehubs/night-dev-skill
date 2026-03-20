@@ -328,6 +328,43 @@ check_jq() {
     fi
 }
 
+# --- Awk Script Constants ---
+readonly _PARSE_AWK_SCRIPT='
+    # pytest-style: "X passed, Y failed"
+    /passed/ { for(i=1;i<=NF;i++) if($(i+1)=="passed") py_p=$i }
+    /failed/ { for(i=1;i<=NF;i++) if($(i+1)=="failed") py_f=$i }
+
+    # jest/vitest-style: "Tests: X passed, Y failed, Z total"
+    /Tests:.*passed/ { for(i=1;i<=NF;i++) { if($(i+1)=="passed,") js_p=$i; if($(i+1)=="failed,") js_f=$i; if($(i+1)=="total") js_t=$i } }
+
+    # cargo-style: "test result: ok. X passed; Y failed"
+    /test result:/ { for(i=1;i<=NF;i++) { if($(i+1)=="passed;") cg_p=$i; if($(i+1)~/^failed/) cg_f=$i } }
+
+    # coverage: line matching "cover" with a percentage
+    /[0-9]+(\.[0-9]+)?%/ && /[Cc]over/ {
+        match($0, /([0-9]+(\.[0-9]+)?)%/, arr)
+        if (arr[1]+0 > 0) cov=arr[1]
+    }
+
+    # duration: line matching time/duration/finished/ran with Ns
+    /[0-9]+(\.[0-9]+)?s/ && /[Tt]ime|[Dd]uration|[Ff]inished|[Rr]an/ {
+        match($0, /([0-9]+(\.[0-9]+)?)s/, arr)
+        if (arr[1]+0 > 0) dur=arr[1]
+    }
+
+    END {
+        p=py_p+0; f=py_f+0; t=0
+        # Fallback to jest if pytest found nothing
+        if (p==0 && f==0) { p=js_p+0; f=js_f+0; t=js_t+0 }
+        # Fallback to cargo if jest found nothing
+        if (p==0 && f==0) { p=cg_p+0; f=cg_f+0 }
+        if (t==0) t=p+f
+        # Truncate coverage and duration to integer
+        c=int(cov+0); d=int(dur+0)
+        print p, f, t, c, d
+    }
+'
+
 # --- Score Calculation ---
 # Calculate evolutionary score from test results
 # Formula: score = (passing * 10) + (total * 2) + (coverage * 5) - (failing * 20) - (time_s * 0.1)
@@ -355,47 +392,13 @@ calculate_score() {
 parse_test_results() {
     local test_output_file="$1"
 
-    if [[ ! -f "$test_output_file" ]]; then
+    if [[ ! -f "$test_output_file" ]] || [[ ! -s "$test_output_file" ]]; then
         echo "0 0 0 0 0"
         return
     fi
 
     local result
-    result=$(awk '
-        # pytest-style: "X passed, Y failed"
-        /passed/ { for(i=1;i<=NF;i++) if($(i+1)=="passed") py_p=$i }
-        /failed/ { for(i=1;i<=NF;i++) if($(i+1)=="failed") py_f=$i }
-
-        # jest/vitest-style: "Tests: X passed, Y failed, Z total"
-        /Tests:.*passed/ { for(i=1;i<=NF;i++) { if($(i+1)=="passed,") js_p=$i; if($(i+1)=="failed,") js_f=$i; if($(i+1)=="total") js_t=$i } }
-
-        # cargo-style: "test result: ok. X passed; Y failed"
-        /test result:/ { for(i=1;i<=NF;i++) { if($(i+1)=="passed;") cg_p=$i; if($(i+1)~/^failed/) cg_f=$i } }
-
-        # coverage: line matching "cover" with a percentage
-        /[0-9]+(\.[0-9]+)?%/ && /[Cc]over/ {
-            match($0, /([0-9]+(\.[0-9]+)?)%/, arr)
-            if (arr[1]+0 > 0) cov=arr[1]
-        }
-
-        # duration: line matching time/duration/finished/ran with Ns
-        /[0-9]+(\.[0-9]+)?s/ && /[Tt]ime|[Dd]uration|[Ff]inished|[Rr]an/ {
-            match($0, /([0-9]+(\.[0-9]+)?)s/, arr)
-            if (arr[1]+0 > 0) dur=arr[1]
-        }
-
-        END {
-            p=py_p+0; f=py_f+0; t=0
-            # Fallback to jest if pytest found nothing
-            if (p==0 && f==0) { p=js_p+0; f=js_f+0; t=js_t+0 }
-            # Fallback to cargo if jest found nothing
-            if (p==0 && f==0) { p=cg_p+0; f=cg_f+0 }
-            if (t==0) t=p+f
-            # Truncate coverage and duration to integer
-            c=int(cov+0); d=int(dur+0)
-            print p, f, t, c, d
-        }
-    ' "$test_output_file")
+    result=$(awk "$_PARSE_AWK_SCRIPT" "$test_output_file")
 
     echo "${result:-0 0 0 0 0}"
 }
@@ -577,7 +580,7 @@ follow_night_dev() {
             echo ""
             echo -e "${GREEN}═══ Night Dev Completed ═══${NC}"
             if [[ "$has_jq" == "true" ]]; then
-                echo -e "$(jq -r '"Applied: \(.stats.total_applied) | Skipped: \(.stats.total_skipped) | Reverted: \(.stats.total_reverted) | Score: \(.current_tests.score // "N/A")"' "$status_file")"
+                printf '%s\n' "$(jq -r '"Applied: \(.stats.total_applied) | Skipped: \(.stats.total_skipped) | Reverted: \(.stats.total_reverted) | Score: \(.current_tests.score // "N/A")"' "$status_file")"
             fi
             break
         fi
@@ -746,39 +749,6 @@ EOSETTINGS
       fi
     }
 
-    # Update a nested field using dot-path (e.g., "stats.total_applied")
-    update_status_nested() {
-      local path="$1" value="$2"
-      if [[ "$HAS_JQ" == "true" ]]; then
-        local tmp="${ND_DIR}/status.tmp.json"
-        jq --arg v "$value" ".${path} = (\$v | try tonumber catch \$v)" "$ND_DIR/status.json" > "$tmp" && mv "$tmp" "$ND_DIR/status.json"
-      fi
-    }
-
-    # Update score in status.json (baseline or current)
-    update_score() {
-      local section="$1"  # "baseline_tests" or "current_tests"
-      local passing="$2" failing="$3" total="$4" coverage="$5" time_s="$6" score="$7"
-      if [[ "$HAS_JQ" == "true" ]]; then
-        local tmp="${ND_DIR}/status.tmp.json"
-        jq --argjson p "$passing" --argjson f "$failing" --argjson t "$total" \
-           --argjson c "$coverage" --argjson ts "$time_s" --arg s "$score" \
-           ".${section} = {passing: \$p, failing: \$f, total: \$t, coverage: \$c, time_s: \$ts, score: \$s}" \
-           "$ND_DIR/status.json" > "$tmp" && mv "$tmp" "$ND_DIR/status.json"
-      fi
-    }
-
-    # Append score to history array
-    append_score_history() {
-      local loop_num="$1" score="$2"
-      if [[ "$HAS_JQ" == "true" ]]; then
-        local tmp="${ND_DIR}/status.tmp.json"
-        jq --argjson l "$loop_num" --arg s "$score" \
-          '.score_history += [{loop: $l, score: $s}]' \
-          "$ND_DIR/status.json" > "$tmp" && mv "$tmp" "$ND_DIR/status.json"
-      fi
-    }
-
     # --- Cleanup Trap ---
 
     cleanup() {
@@ -793,6 +763,10 @@ EOSETTINGS
         echo "Backup: $BACKUP_DIR"
       fi
       if [[ "$HAS_JQ" == "true" ]] && [[ -f "$ND_DIR/status.json" ]]; then
+        # Deferred circuit-breaker status update
+        if [[ "${_CIRCUIT_BREAKER_TRIGGERED:-false}" == "true" ]]; then
+          update_status "circuit_breaker" "OPEN"
+        fi
         local final_score
         final_score=$(jq -r '.current_tests.score // "N/A"' "$ND_DIR/status.json" 2>/dev/null)
         echo "Final score: $final_score"
@@ -819,8 +793,23 @@ EOSETTINGS
         SKILL_CONTENT="ERROR: SKILL.md not found at ${SKILL_DIR}/SKILL.md"
     fi
 
+    # Cache static parts of the prompt template (PERF-19)
+    local _PROMPT_STATIC
+    _PROMPT_STATIC="You are Night Dev, an evolutionary software development agent.
+
+CONTEXT:
+- Worktree: ${WORKTREE_PATH}
+- Test runner: ${TEST_RUNNER}
+- Skip research: ${SKIP_RESEARCH}
+- Night dev dir: ${ND_DIR}
+- CodeIntel available: ${CODEINTEL_AVAILABLE}
+
+${SKILL_CONTENT}
+"
+
     CURRENT_LOOP=0
     CONSECUTIVE_ZERO=0
+    _CIRCUIT_BREAKER_TRIGGERED=false
     CONSECUTIVE_NO_IMPROVEMENT=0
     PREVIOUS_SCORE="0.0"
     CACHED_PREV_APPLIED=""
@@ -845,7 +834,7 @@ EOSETTINGS
       # Exit: circuit breaker (3 consecutive loops with all implementations failing tests)
       if [[ $CONSECUTIVE_ZERO -ge $CIRCUIT_BREAKER_THRESHOLD ]]; then
         echo "Circuit breaker: $CIRCUIT_BREAKER_THRESHOLD consecutive loops with 0 successful changes. Stopping." >&2
-        update_status "circuit_breaker" "OPEN"
+        _CIRCUIT_BREAKER_TRIGGERED=true
         break
       fi
 
@@ -897,22 +886,14 @@ EOSETTINGS
 ${prev_changelog_cached}"
       fi
 
-      LOOP_PROMPT="You are Night Dev, an evolutionary software development agent.
-
-CONTEXT:
-- Loop: ${CURRENT_LOOP} / ${MAX_LOOPS}
-- Worktree: ${WORKTREE_PATH}
-- Test runner: ${TEST_RUNNER}
-- Skip research: ${SKIP_RESEARCH}
+      # Build prompt: static template + dynamic fields only
+      LOOP_PROMPT="- Loop: ${CURRENT_LOOP} / ${MAX_LOOPS}
 - Loop directory: ${LOOP_DIR}
-- Night dev dir: ${ND_DIR}
 - Is first loop: ${IS_FIRST_LOOP}
 - Previous score: ${PREVIOUS_SCORE}
-- CodeIntel available: ${CODEINTEL_AVAILABLE}
 ${PREV_CHANGELOG}
 
-${SKILL_CONTENT}
-"
+${_PROMPT_STATIC}"
 
       # Invoke Claude
       if [[ "$INLINE_MODE" == "true" ]]; then
@@ -959,8 +940,12 @@ ${SKILL_CONTENT}
       local cur_passing cur_failing cur_total cur_coverage cur_time_s
       read -r cur_passing cur_failing cur_total cur_coverage cur_time_s <<< "$test_data"
 
-      local current_score
-      current_score=$(calculate_score "$cur_passing" "$cur_failing" "$cur_total" "$cur_coverage" "$cur_time_s")
+      # Inline score arithmetic (avoids subshell fork to calculate_score)
+      local score_x10=$(( (cur_passing * 100) + (cur_total * 20) + (cur_coverage * 50) - (cur_failing * 200) - cur_time_s ))
+      local current_score=$(( score_x10 / 10 ))
+      local score_remainder=$(( score_x10 % 10 ))
+      [[ $score_remainder -lt 0 ]] && score_remainder=$(( -score_remainder ))
+      current_score="${current_score}.${score_remainder}"
 
       echo -e "Score: ${YELLOW}${current_score}${NC} (passing=${cur_passing}, failing=${cur_failing}, total=${cur_total}, coverage=${cur_coverage}%)"
 
@@ -983,17 +968,18 @@ ${SKILL_CONTENT}
       fi
       PREVIOUS_SCORE="$current_score"
 
-      # Single-pass changelog parsing — one awk extracts all counters
+      # Single-pass changelog parsing — pure bash pattern matching
       if [[ -f "$LOOP_DIR/changelog.md" ]]; then
-        local changelog_counts
-        changelog_counts=$(awk '
-          /^[[:space:]]*[-*][[:space:]]+APPLICATA[[:space:]]*:/{a++}
-          /^[[:space:]]*[-*][[:space:]]+SKIPPATA[[:space:]]*:/{s++}
-          /^[[:space:]]*[-*][[:space:]]+REVERTITA[[:space:]]*:/{r++}
-          /^[[:space:]]*[-*][[:space:]]+(ESCALATED|URGENTE)[[:space:]]*:/{e++}
-          END{print a+0, s+0, r+0, e+0}
-        ' "$LOOP_DIR/changelog.md")
-        read -r APPLIED SKIPPED REVERTED ESCALATED <<< "$changelog_counts"
+        APPLIED=0; SKIPPED=0; REVERTED=0; ESCALATED=0
+        local _cl_line
+        while IFS= read -r _cl_line; do
+          case "$_cl_line" in
+            *[-\*]\ APPLICATA\ :*|*[-\*]\ APPLICATA:*)   APPLIED=$((APPLIED + 1)) ;;
+            *[-\*]\ SKIPPATA\ :*|*[-\*]\ SKIPPATA:*)     SKIPPED=$((SKIPPED + 1)) ;;
+            *[-\*]\ REVERTITA\ :*|*[-\*]\ REVERTITA:*)   REVERTED=$((REVERTED + 1)) ;;
+            *[-\*]\ ESCALATED\ :*|*[-\*]\ ESCALATED:*|*[-\*]\ URGENTE\ :*|*[-\*]\ URGENTE:*) ESCALATED=$((ESCALATED + 1)) ;;
+          esac
+        done < "$LOOP_DIR/changelog.md"
 
         # Cache for next iteration's early-exit check (avoids re-parsing)
         CACHED_PREV_APPLIED="$APPLIED"
