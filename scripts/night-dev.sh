@@ -967,14 +967,7 @@ ${SKILL_CONTENT}
 
       echo -e "Score: ${YELLOW}${current_score}${NC} (passing=${cur_passing}, failing=${cur_failing}, total=${cur_total}, coverage=${cur_coverage}%)"
 
-      # Update baseline on first loop
-      if [[ $CURRENT_LOOP -eq 1 ]]; then
-        update_score "baseline_tests" "$cur_passing" "$cur_failing" "$cur_total" "$cur_coverage" "$cur_time_s" "$current_score"
-      fi
-
-      # Update current score
-      update_score "current_tests" "$cur_passing" "$cur_failing" "$cur_total" "$cur_coverage" "$cur_time_s" "$current_score"
-      append_score_history "$CURRENT_LOOP" "$current_score"
+      # Defer status.json updates — batch all jq calls into one at end of loop iteration
 
       # Check score improvement (pure bash: split on '.' and compare as scaled integers)
       local improved="no"
@@ -1024,19 +1017,6 @@ ${SKILL_CONTENT}
           CONSECUTIVE_ZERO=0
         fi
 
-        # Batch stats update — single jq call for all counters
-        if [[ "$HAS_JQ" == "true" ]]; then
-          local tmp="${ND_DIR}/status.tmp.json"
-          jq --argjson a "$APPLIED" --argjson s "$SKIPPED" \
-             --argjson r "$REVERTED" --argjson e "$ESCALATED" \
-             --argjson cz "$CONSECUTIVE_ZERO" \
-             '.stats.total_applied += $a |
-              .stats.total_skipped += $s |
-              .stats.total_reverted += $r |
-              .stats.total_escalated += $e |
-              .stats.consecutive_zero_applied = $cz' \
-             "$ND_DIR/status.json" > "$tmp" && mv "$tmp" "$ND_DIR/status.json"
-        fi
       else
         echo "WARNING: Loop $CURRENT_LOOP did not produce changelog. Claude may have errored." >&2
         echo "Check: $LOOP_DIR/claude_stderr.log" >&2
@@ -1045,7 +1025,30 @@ ${SKILL_CONTENT}
           tail -5 "$LOOP_DIR/claude_stderr.log" >&2
         fi
         CONSECUTIVE_ZERO=$((CONSECUTIVE_ZERO + 1))
-        update_status_nested "stats.consecutive_zero_applied" "$CONSECUTIVE_ZERO"
+        APPLIED=0; SKIPPED=0; REVERTED=0; ESCALATED=0
+      fi
+
+      # Batched status.json update — single jq call for scores, history, and stats
+      if [[ "$HAS_JQ" == "true" ]]; then
+        local tmp="${ND_DIR}/status.tmp.json"
+        local jq_expr='.current_tests = {passing: $p, failing: $f, total: $t, coverage: $c, time_s: $ts, score: $s}
+          | .score_history += [{loop: $l, score: $s}]
+          | .stats.total_applied += $a
+          | .stats.total_skipped += $sk
+          | .stats.total_reverted += $r
+          | .stats.total_escalated += $e
+          | .stats.consecutive_zero_applied = $cz'
+        # On first loop, also set baseline
+        if [[ $CURRENT_LOOP -eq 1 ]]; then
+          jq_expr=".baseline_tests = {passing: \$p, failing: \$f, total: \$t, coverage: \$c, time_s: \$ts, score: \$s} | ${jq_expr}"
+        fi
+        jq --argjson p "$cur_passing" --argjson f "$cur_failing" --argjson t "$cur_total" \
+           --argjson c "$cur_coverage" --argjson ts "$cur_time_s" --arg s "$current_score" \
+           --argjson l "$CURRENT_LOOP" \
+           --argjson a "${APPLIED:-0}" --argjson sk "${SKIPPED:-0}" \
+           --argjson r "${REVERTED:-0}" --argjson e "${ESCALATED:-0}" \
+           --argjson cz "$CONSECUTIVE_ZERO" \
+           "$jq_expr" "$ND_DIR/status.json" > "$tmp" && mv "$tmp" "$ND_DIR/status.json"
       fi
 
       # --- Push to remote if --push enabled ---
